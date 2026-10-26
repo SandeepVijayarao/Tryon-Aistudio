@@ -1,0 +1,837 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  RotateCcw,
+  RotateCw,
+  Play,
+  Pause,
+  ZoomIn,
+  ZoomOut,
+  Compass,
+  Loader2,
+  Sparkles,
+  Ruler,
+  Layers,
+} from 'lucide-react';
+import { SpinFrame, SizeFitResult } from '../types/tryon.ts';
+import { OutfitSlotPiece, OutfitSlotType } from '../utils/wardrobeStyler.ts';
+
+interface Turntable360ViewerProps {
+  frames: SpinFrame[];
+  sizeLabel: string;
+  sizeFitResult?: SizeFitResult;
+  garmentName?: string;
+  activeGarmentId?: string;
+  garmentFrontImage?: string;
+  garmentBackImage?: string;
+  activeOutfitSlots?: {
+    top: OutfitSlotPiece;
+    layering: OutfitSlotPiece;
+    bottom: OutfitSlotPiece;
+    watch: OutfitSlotPiece;
+    shoes: OutfitSlotPiece;
+  };
+  activeOutfitSlotType?: OutfitSlotType;
+  onSelectOutfitSlot?: (piece: OutfitSlotPiece) => void;
+  isGenerating?: boolean;
+  onRegenerateWithAI?: () => void;
+  onAngleChange?: (angle: number) => void;
+  syncAngle?: number;
+}
+
+const ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
+
+export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
+  frames,
+  sizeLabel,
+  sizeFitResult,
+  garmentName,
+  activeGarmentId,
+  garmentFrontImage,
+  garmentBackImage,
+  activeOutfitSlots,
+  activeOutfitSlotType = 'top',
+  onSelectOutfitSlot,
+  isGenerating,
+  onRegenerateWithAI,
+  onAngleChange,
+  syncAngle,
+}) => {
+  const [currentAngleIndex, setCurrentAngleIndex] = useState(0);
+  const [isAutoSpinning, setIsAutoSpinning] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [showFitCalipers, setShowFitCalipers] = useState(false);
+  const [showOriginalBefore, setShowOriginalBefore] = useState(false);
+  const [showOutfitPins, setShowOutfitPins] = useState(true);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartXRef = useRef(0);
+  const dragStartIndexRef = useRef(0);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const autoSpinTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (syncAngle !== undefined) {
+      const idx = ANGLES.indexOf(syncAngle);
+      if (idx !== -1 && idx !== currentAngleIndex) {
+        setCurrentAngleIndex(idx);
+      }
+    }
+  }, [syncAngle]);
+
+  const currentAngle = ANGLES[currentAngleIndex];
+
+  const updateAngleIndex = useCallback(
+    (newIndex: number) => {
+      const normalizedIndex = ((newIndex % 8) + 8) % 8;
+      setCurrentAngleIndex(normalizedIndex);
+      if (onAngleChange) {
+        onAngleChange(ANGLES[normalizedIndex]);
+      }
+    },
+    [onAngleChange]
+  );
+
+  // Auto-spin logic: slowly spins 45° every 1.8 seconds when active
+  useEffect(() => {
+    if (!isAutoSpinning) {
+      if (autoSpinTimerRef.current) clearInterval(autoSpinTimerRef.current);
+      return;
+    }
+
+    autoSpinTimerRef.current = setInterval(() => {
+      updateAngleIndex(currentAngleIndex + 1);
+    }, 1800);
+
+    return () => {
+      if (autoSpinTimerRef.current) clearInterval(autoSpinTimerRef.current);
+    };
+  }, [isAutoSpinning, currentAngleIndex, updateAngleIndex]);
+
+  const handlePointerDown = (clientX: number) => {
+    setIsDragging(true);
+    setIsAutoSpinning(false);
+    dragStartXRef.current = clientX;
+    dragStartIndexRef.current = currentAngleIndex;
+  };
+
+  const handlePointerMove = (clientX: number) => {
+    if (!isDragging) return;
+    const deltaX = clientX - dragStartXRef.current;
+    const steps = Math.floor(deltaX / 30);
+    updateAngleIndex(dragStartIndexRef.current - steps);
+  };
+
+  const handlePointerUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    setZoomLevel((prev) => {
+      const next = prev - e.deltaY * 0.0015;
+      return Math.min(2.5, Math.max(1, next));
+    });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowRight') {
+      setIsAutoSpinning(false);
+      updateAngleIndex(currentAngleIndex + 1);
+    } else if (e.key === 'ArrowLeft') {
+      setIsAutoSpinning(false);
+      updateAngleIndex(currentAngleIndex - 1);
+    }
+  };
+
+  const jumpToAngle = (targetAngle: number) => {
+    setIsAutoSpinning(false);
+    const idx = ANGLES.indexOf(targetAngle);
+    if (idx !== -1) updateAngleIndex(idx);
+  };
+
+  const currentFrame = frames.find((f) => f.angle === currentAngle);
+  const isFrameReady = !!currentFrame?.imageUrl;
+
+  // Determine if the active garment is one of the pre-baked studio presets (Zara Blazer or Sandstone Overshirt)
+  // or a live shop/closet garment that should be dynamically draped onto the human model
+  const isPrebakedZaraBlazer =
+    !activeGarmentId ||
+    activeGarmentId.includes('zara-comfort') ||
+    activeGarmentId === 'wardrobe-zara-blazer';
+  const isPrebakedLinenOvershirt =
+    activeGarmentId === 'relaxed-linen-overshirt' ||
+    activeGarmentId === 'wardrobe-linen-overshirt';
+
+  // If the current frame was generated by Gemini AI (data:image/png or data:image/jpeg), it already has the garment baked in
+  const currentFrameIsAiSynthesized = Boolean(
+    currentFrame?.imageUrl?.startsWith('data:image/png') ||
+      currentFrame?.imageUrl?.startsWith('data:image/jpeg') ||
+      currentFrame?.imageUrl?.startsWith('data:image/webp')
+  );
+
+  // Show live garment draping on the human model whenever a shop or closet piece is selected
+  // that isn't already baked into the base preset photo
+  const shouldDrapeGarmentOnModel =
+    !showOriginalBefore &&
+    !isPrebakedZaraBlazer &&
+    !isPrebakedLinenOvershirt &&
+    !currentFrameIsAiSynthesized &&
+    Boolean(garmentFrontImage);
+
+  const uniqueUrls = new Set(frames.map((f) => f.imageUrl).filter(Boolean));
+  const isSinglePhotoTurntable = uniqueUrls.size === 1;
+
+  // Compute style for 3-view composite sheet or multi-angle photorealistic turntable
+  const getFrameStyle = (angle: number, imageUrl?: string): React.CSSProperties => {
+    const easeChest = sizeFitResult?.chest.ease ?? 4;
+    const fitWidthScale = 1 + Math.max(-0.03, Math.min(0.04, (easeChest - 4) * 0.002));
+
+    if (imageUrl?.includes('front-back-profile-full-portrait')) {
+      if (angle === 0) {
+        return {
+          clipPath: 'inset(0 39% 0 30%)',
+          transform: `translateX(4.5%) scaleX(${fitWidthScale})`,
+        };
+      }
+      if (angle === 45) {
+        return {
+          clipPath: 'inset(0 39% 0 30%)',
+          transform: `perspective(900px) rotateY(-18deg) translateX(4.5%) scaleX(${fitWidthScale * 0.96})`,
+        };
+      }
+      if (angle === 315) {
+        return {
+          clipPath: 'inset(0 39% 0 30%)',
+          transform: `perspective(900px) rotateY(18deg) translateX(4.5%) scaleX(${fitWidthScale * 0.96})`,
+        };
+      }
+      if (angle === 90) {
+        return {
+          clipPath: 'inset(0 70% 0 0)',
+          transform: `translateX(34.5%) scaleX(${fitWidthScale})`,
+        };
+      }
+      if (angle === 270) {
+        return {
+          clipPath: 'inset(0 70% 0 0)',
+          transform: `scaleX(${-fitWidthScale}) translateX(34.5%)`,
+        };
+      }
+      if (angle === 135) {
+        return {
+          clipPath: 'inset(0 0 0 62%)',
+          transform: `perspective(900px) rotateY(18deg) translateX(-28.5%) scaleX(${fitWidthScale * 0.96})`,
+        };
+      }
+      if (angle === 225) {
+        return {
+          clipPath: 'inset(0 0 0 62%)',
+          transform: `perspective(900px) rotateY(-18deg) translateX(-28.5%) scaleX(${fitWidthScale * 0.96})`,
+        };
+      }
+      return {
+        clipPath: 'inset(0 0 0 62%)',
+        transform: `translateX(-28.5%) scaleX(${fitWidthScale})`,
+      };
+    }
+
+    if (isSinglePhotoTurntable) {
+      const tiltMap: Record<number, string> = {
+        0: `perspective(1000px) rotateY(0deg) scaleX(${fitWidthScale})`,
+        45: `perspective(1000px) rotateY(-18deg) scaleX(${fitWidthScale * 0.96})`,
+        90: `perspective(1000px) rotateY(-32deg) scaleX(${fitWidthScale * 0.88})`,
+        135: `perspective(1000px) rotateY(22deg) scaleX(${-fitWidthScale * 0.94})`,
+        180: `perspective(1000px) rotateY(0deg) scaleX(${-fitWidthScale})`,
+        225: `perspective(1000px) rotateY(-22deg) scaleX(${-fitWidthScale * 0.94})`,
+        270: `perspective(1000px) rotateY(32deg) scaleX(${-fitWidthScale * 0.88})`,
+        315: `perspective(1000px) rotateY(18deg) scaleX(${fitWidthScale * 0.96})`,
+      };
+      return { transform: tiltMap[angle] || `scaleX(${fitWidthScale})` };
+    }
+
+    const isLeftMirroredPreset =
+      imageUrl?.startsWith('/src/assets/images/') &&
+      (angle === 225 || angle === 270 || angle === 315);
+
+    return {
+      transform: isLeftMirroredPreset
+        ? `scaleX(${-fitWidthScale})`
+        : `scaleX(${fitWidthScale})`,
+    };
+  };
+
+  /**
+   * Computes the 3D torso-draping transform for the selected garment on the human model
+   * across all 8 turntable angles, scaled by the user's chest/waist ease for the selected size.
+   */
+  const getGarmentDrapeStyle = (angle: number): React.CSSProperties => {
+    const easeChest = sizeFitResult?.chest.ease ?? 6;
+    const widthScale = 1 + Math.max(-0.06, Math.min(0.1, (easeChest - 5) * 0.006));
+
+    // Position by slot type (Upper body torso vs Bottom trousers vs Watch vs Shoes)
+    let topPct = '17.5%';
+    let heightPct = '37%';
+    let widthPct = '48%';
+
+    if (activeOutfitSlotType === 'bottom') {
+      topPct = '47%';
+      heightPct = '41%';
+      widthPct = '40%';
+    } else if (activeOutfitSlotType === 'watch') {
+      topPct = '41%';
+      heightPct = '14%';
+      widthPct = '22%';
+    } else if (activeOutfitSlotType === 'shoes') {
+      topPct = '81%';
+      heightPct = '15%';
+      widthPct = '34%';
+    }
+
+    const angleTransforms: Record<number, string> = {
+      0: `perspective(900px) rotateY(0deg) scaleX(${widthScale})`,
+      45: `perspective(900px) rotateY(-22deg) translateX(-4%) scaleX(${widthScale * 0.92})`,
+      90: `perspective(900px) rotateY(-48deg) scaleX(${widthScale * 0.68})`,
+      135: `perspective(900px) rotateY(22deg) translateX(4%) scaleX(${widthScale * 0.92})`,
+      180: `perspective(900px) rotateY(0deg) scaleX(${widthScale})`,
+      225: `perspective(900px) rotateY(-22deg) translateX(-4%) scaleX(${widthScale * 0.92})`,
+      270: `perspective(900px) rotateY(48deg) scaleX(${widthScale * 0.68})`,
+      315: `perspective(900px) rotateY(22deg) translateX(4%) scaleX(${widthScale * 0.92})`,
+    };
+
+    return {
+      top: topPct,
+      height: heightPct,
+      width: widthPct,
+      transform: angleTransforms[angle] || `scaleX(${widthScale})`,
+    };
+  };
+
+  const getCaliperColor = (cat?: string) => {
+    if (cat === 'fitted') return '#10b981'; // emerald-500
+    if (cat === 'tight') return '#f43f5e'; // rose-500
+    if (cat === 'relaxed') return '#f59e0b'; // amber-500
+    return '#8b5cf6'; // violet-500 (loose)
+  };
+
+  const ORIGINAL_SHEET_URL =
+    '/assets/aistudio/front-back-profile-full-portrait-man-white-175624016_676f20bb.webp';
+
+  const isRearAngle = currentAngle === 135 || currentAngle === 180 || currentAngle === 225;
+  const activeDrapeImage = isRearAngle
+    ? garmentBackImage || garmentFrontImage
+    : garmentFrontImage;
+
+  return (
+    <div
+      ref={viewerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onWheel={handleWheel}
+      className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden flex flex-col focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+    >
+      {/* Viewer Header */}
+      <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-bold text-sm text-slate-900 shrink-0">Size {sizeLabel}</span>
+          {sizeFitResult && (
+            <>
+              <span className="text-slate-300" aria-hidden="true">·</span>
+              <span className="text-xs font-medium text-slate-600 capitalize shrink-0">
+                {sizeFitResult.overallCategory} fit
+              </span>
+            </>
+          )}
+          {garmentName && (
+            <>
+              <span className="text-slate-300 hidden sm:inline" aria-hidden="true">·</span>
+              <span className="text-xs font-semibold text-indigo-700 truncate hidden sm:inline">
+                {garmentName}
+              </span>
+            </>
+          )}
+        </div>
+
+        {/* Angle readout */}
+        <div className="flex items-center gap-1.5 text-slate-700 text-xs font-semibold tabular-nums shrink-0">
+          <Compass className="w-3.5 h-3.5 text-indigo-600" />
+          <span>{currentAngle}°</span>
+          <span className="text-[11px] text-slate-400 font-normal">
+            ({currentAngleIndex + 1}/8)
+          </span>
+        </div>
+      </div>
+
+      {/* Main Interactive Turntable Viewport */}
+      <div
+        onMouseDown={(e) => handlePointerDown(e.clientX)}
+        onMouseMove={(e) => handlePointerMove(e.clientX)}
+        onMouseUp={handlePointerUp}
+        onMouseLeave={handlePointerUp}
+        onTouchStart={(e) => handlePointerDown(e.touches[0].clientX)}
+        onTouchMove={(e) => handlePointerMove(e.touches[0].clientX)}
+        onTouchEnd={handlePointerUp}
+        className="relative aspect-3/4 max-h-[580px] w-full bg-[#f4f4f5] overflow-hidden cursor-ew-resize select-none flex items-center justify-center"
+      >
+        {/* Studio Turntable Pedestal Ring at base */}
+        <div className="absolute bottom-4 inset-x-10 h-8 rounded-full border border-slate-300/70 bg-slate-200/35 pointer-events-none z-0" />
+
+        {/* All ready frames preloaded with smooth crossfade */}
+        <div
+          className="w-full h-full flex items-center justify-center transition-transform duration-150 ease-out z-10 relative"
+          style={{ transform: `scale(${zoomLevel})` }}
+        >
+          {ANGLES.map((angle) => {
+            const frame = frames.find((f) => f.angle === angle);
+            const isVisible = angle === currentAngle;
+
+            const activeUrl = showOriginalBefore ? ORIGINAL_SHEET_URL : frame?.imageUrl;
+            if (!activeUrl) return null;
+
+            const isSheet = activeUrl.includes('front-back-profile-full-portrait');
+
+            return (
+              <img
+                key={angle}
+                src={activeUrl}
+                alt={`Model wearing size ${sizeLabel} at ${angle}°`}
+                referrerPolicy="no-referrer"
+                style={getFrameStyle(angle, activeUrl)}
+                className={`absolute pointer-events-none transition-all duration-200 ${
+                  isSheet
+                    ? 'h-[94%] w-auto max-w-none'
+                    : 'inset-0 w-full h-full object-contain'
+                } ${isVisible ? 'opacity-100 z-10' : 'opacity-0 z-0'}`}
+              />
+            );
+          })}
+
+          {/* Compact Selected Garment Reference Badge at bottom-left of viewport */}
+          {!showOriginalBefore && activeDrapeImage && (
+            <div className="absolute left-3 bottom-12 z-20 pointer-events-none flex items-center gap-2 bg-white/95 backdrop-blur-md p-1.5 pr-2.5 rounded-xl border border-slate-200/90 shadow-xs max-w-[205px]">
+              <img
+                src={activeDrapeImage}
+                alt={garmentName || 'Active garment'}
+                referrerPolicy="no-referrer"
+                className="w-9 h-11 rounded-lg object-cover bg-slate-100 border border-slate-200 shrink-0"
+              />
+              <div className="min-w-0">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-indigo-600 truncate">
+                  {currentFrame?.status === 'generating' || isGenerating
+                    ? 'Fitting on Model...'
+                    : `Fitted · Size ${sizeLabel}`}
+                </div>
+                <div className="text-[11px] font-bold text-slate-900 truncate">
+                  {garmentName?.split('—').pop()?.trim() || 'Active Piece'}
+                </div>
+                <div className="text-[10px] text-slate-500 font-mono truncate">
+                  {isRearAngle ? 'Rear 180° Ref' : 'Front 0° Ref'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Active 5-Piece Outfit Anatomical Mini-Stack on right edge of viewport */}
+          {activeOutfitSlots && showOutfitPins && !showOriginalBefore && (
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              className="absolute right-2.5 bottom-12 z-25 flex flex-col gap-1.5 bg-white/95 backdrop-blur-md p-2 rounded-xl border border-slate-200/90 shadow-sm max-w-[148px]"
+            >
+              <div className="text-[10px] font-bold text-slate-800 px-1 flex items-center justify-between gap-1">
+                <span>5-Piece Outfit</span>
+                <span className="text-emerald-700 font-mono">Fit OK</span>
+              </div>
+              {(
+                [
+                  activeOutfitSlots.top,
+                  activeOutfitSlots.layering,
+                  activeOutfitSlots.bottom,
+                  activeOutfitSlots.watch,
+                  activeOutfitSlots.shoes,
+                ] as OutfitSlotPiece[]
+              ).map((slotPiece) => {
+                const isCurrentPiece =
+                  garmentName?.includes(slotPiece.name) ||
+                  activeOutfitSlotType === slotPiece.slot;
+                return (
+                  <button
+                    key={slotPiece.slot}
+                    type="button"
+                    onClick={() => onSelectOutfitSlot && onSelectOutfitSlot(slotPiece)}
+                    className={`flex items-center gap-1.5 p-1 rounded-lg text-left transition-colors cursor-pointer ${
+                      isCurrentPiece
+                        ? 'bg-slate-900 text-white'
+                        : 'hover:bg-slate-100 text-slate-800'
+                    }`}
+                    title={`Inspect ${slotPiece.slotLabel}: ${slotPiece.name}`}
+                  >
+                    <img
+                      src={slotPiece.imageUrl}
+                      alt={slotPiece.name}
+                      referrerPolicy="no-referrer"
+                      className="w-6 h-6 rounded object-cover bg-slate-100 border border-slate-200 shrink-0"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`text-[9px] font-bold uppercase tracking-tight truncate ${
+                          isCurrentPiece ? 'text-indigo-200' : 'text-slate-400'
+                        }`}
+                      >
+                        {slotPiece.slotLabel.split(' ')[0]}
+                      </div>
+                      <div className="text-[10px] font-semibold truncate">
+                        {slotPiece.name}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Calibrated Anthropometric Fit Gauge Overlay */}
+          {showFitCalipers && sizeFitResult && isFrameReady && (
+            <svg
+              viewBox="0 0 400 600"
+              className="absolute inset-0 w-full h-full pointer-events-none z-20"
+            >
+              {/* Chest Ease Line */}
+              <g transform="translate(0, 185)">
+                <line
+                  x1={134 - Math.min(20, Math.max(-8, sizeFitResult.chest.ease))}
+                  y1="0"
+                  x2={266 + Math.min(20, Math.max(-8, sizeFitResult.chest.ease))}
+                  y2="0"
+                  stroke={getCaliperColor(sizeFitResult.chest.category)}
+                  strokeWidth="2"
+                  strokeDasharray="4 3"
+                />
+                <circle
+                  cx={134 - Math.min(20, Math.max(-8, sizeFitResult.chest.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.chest.category)}
+                />
+                <circle
+                  cx={266 + Math.min(20, Math.max(-8, sizeFitResult.chest.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.chest.category)}
+                />
+                <rect
+                  x="154"
+                  y="-10"
+                  width="92"
+                  height="18"
+                  rx="4"
+                  fill="rgba(15, 23, 42, 0.85)"
+                />
+                <text
+                  x="200"
+                  y="2"
+                  fill="#ffffff"
+                  fontSize="9.5"
+                  fontWeight="600"
+                  textAnchor="middle"
+                  fontFamily="system-ui, sans-serif"
+                >
+                  Chest {sizeFitResult.chest.ease > 0 ? `+${sizeFitResult.chest.ease}` : sizeFitResult.chest.ease} cm
+                </text>
+              </g>
+
+              {/* Waist Ease Line */}
+              <g transform="translate(0, 244)">
+                <line
+                  x1={138 - Math.min(20, Math.max(-8, sizeFitResult.waist.ease))}
+                  y1="0"
+                  x2={262 + Math.min(20, Math.max(-8, sizeFitResult.waist.ease))}
+                  y2="0"
+                  stroke={getCaliperColor(sizeFitResult.waist.category)}
+                  strokeWidth="2"
+                  strokeDasharray="4 3"
+                />
+                <circle
+                  cx={138 - Math.min(20, Math.max(-8, sizeFitResult.waist.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.waist.category)}
+                />
+                <circle
+                  cx={262 + Math.min(20, Math.max(-8, sizeFitResult.waist.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.waist.category)}
+                />
+                <rect
+                  x="154"
+                  y="-10"
+                  width="92"
+                  height="18"
+                  rx="4"
+                  fill="rgba(15, 23, 42, 0.85)"
+                />
+                <text
+                  x="200"
+                  y="2"
+                  fill="#ffffff"
+                  fontSize="9.5"
+                  fontWeight="600"
+                  textAnchor="middle"
+                  fontFamily="system-ui, sans-serif"
+                >
+                  Waist {sizeFitResult.waist.ease > 0 ? `+${sizeFitResult.waist.ease}` : sizeFitResult.waist.ease} cm
+                </text>
+              </g>
+
+              {/* Hip Ease Line */}
+              <g transform="translate(0, 302)">
+                <line
+                  x1={136 - Math.min(20, Math.max(-8, sizeFitResult.hip.ease))}
+                  y1="0"
+                  x2={264 + Math.min(20, Math.max(-8, sizeFitResult.hip.ease))}
+                  y2="0"
+                  stroke={getCaliperColor(sizeFitResult.hip.category)}
+                  strokeWidth="2"
+                  strokeDasharray="4 3"
+                />
+                <circle
+                  cx={136 - Math.min(20, Math.max(-8, sizeFitResult.hip.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.hip.category)}
+                />
+                <circle
+                  cx={264 + Math.min(20, Math.max(-8, sizeFitResult.hip.ease))}
+                  cy="0"
+                  r="3.5"
+                  fill={getCaliperColor(sizeFitResult.hip.category)}
+                />
+                <rect
+                  x="154"
+                  y="-10"
+                  width="92"
+                  height="18"
+                  rx="4"
+                  fill="rgba(15, 23, 42, 0.85)"
+                />
+                <text
+                  x="200"
+                  y="2"
+                  fill="#ffffff"
+                  fontSize="9.5"
+                  fontWeight="600"
+                  textAnchor="middle"
+                  fontFamily="system-ui, sans-serif"
+                >
+                  Hip {sizeFitResult.hip.ease > 0 ? `+${sizeFitResult.hip.ease}` : sizeFitResult.hip.ease} cm
+                </text>
+              </g>
+            </svg>
+          )}
+
+          {/* Soft placeholder when current frame is generating */}
+          {(!isFrameReady || currentFrame?.status === 'generating') && (
+            <div className="absolute top-14 left-3 z-20 bg-slate-900/85 backdrop-blur-md text-white px-3 py-1.5 rounded-xl text-[11px] font-medium flex items-center gap-2 shadow-sm pointer-events-none">
+              <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin shrink-0" />
+              <span>Dressing model in {garmentName?.split('—').pop()?.trim()} (Size {sizeLabel})...</span>
+            </div>
+          )}
+        </div>
+
+        {/* Top Viewport Controls Bar (Left & Right separated cleanly) */}
+        <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-1.5 pointer-events-none">
+          <div className="flex flex-wrap items-center gap-1 pointer-events-auto">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowOriginalBefore(!showOriginalBefore);
+              }}
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                showOriginalBefore
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'bg-white/90 text-slate-700 border border-slate-200/80 hover:bg-white'
+              }`}
+              title="Toggle between dressed model vs original shopper photo"
+            >
+              <span>{showOriginalBefore ? 'Before' : 'Before/After'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowFitCalipers(!showFitCalipers);
+              }}
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                showFitCalipers
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'bg-white/90 text-slate-700 border border-slate-200/80 hover:bg-white'
+              }`}
+              title="Toggle chest, waist, and hip ease lines on model"
+            >
+              <Ruler className="w-3 h-3" />
+              <span>Fit Lines</span>
+            </button>
+            {activeOutfitSlots && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowOutfitPins(!showOutfitPins);
+                }}
+                className={`px-2 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                  showOutfitPins
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'bg-white/90 text-slate-700 border border-slate-200/80 hover:bg-white'
+                }`}
+                title="Toggle 5-piece outfit stack on model"
+              >
+                <Layers className="w-3 h-3" />
+                <span>5-Piece</span>
+              </button>
+            )}
+          </div>
+
+          {onRegenerateWithAI && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRegenerateWithAI();
+              }}
+              disabled={isGenerating}
+              className="pointer-events-auto bg-white/95 hover:bg-white text-slate-900 border border-slate-200/80 shadow-xs px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer shrink-0"
+              title="Synthesize fresh 360° frames with Gemini Image model"
+            >
+              <Sparkles className="w-3 h-3 text-indigo-600" />
+              <span>{isGenerating ? 'Fitting...' : 'AI Fit ' + sizeLabel}</span>
+            </button>
+          )}
+        </div>
+
+        {/* On-screen quick rotate drag hint */}
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 bg-slate-900/70 backdrop-blur-md text-white text-[11px] font-medium px-3 py-1 rounded-full pointer-events-none whitespace-nowrap">
+          Drag horizontally or swipe to rotate 360° ({currentAngle}°)
+        </div>
+      </div>
+
+      {/* Viewer Controls Bar */}
+      <div className="px-4 py-3 bg-white border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+        {/* Front & Back Jump Shortcuts */}
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => jumpToAngle(0)}
+            className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              currentAngle === 0
+                ? 'bg-indigo-600 text-white'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+            }`}
+          >
+            Front (0°)
+          </button>
+          <button
+            type="button"
+            onClick={() => jumpToAngle(90)}
+            className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              currentAngle === 90
+                ? 'bg-indigo-600 text-white'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+            }`}
+          >
+            Side (90°)
+          </button>
+          <button
+            type="button"
+            onClick={() => jumpToAngle(180)}
+            className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              currentAngle === 180
+                ? 'bg-indigo-600 text-white'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+            }`}
+          >
+            Back (180°)
+          </button>
+        </div>
+
+        {/* Step Angle Buttons */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              setIsAutoSpinning(false);
+              updateAngleIndex(currentAngleIndex - 1);
+            }}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 hover:text-slate-900 cursor-pointer"
+            title="Step 45° Counter-Clockwise"
+            aria-label="Rotate counter-clockwise"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsAutoSpinning(!isAutoSpinning)}
+            className={`px-2.5 py-1 rounded-lg font-medium flex items-center gap-1 whitespace-nowrap cursor-pointer ${
+              isAutoSpinning
+                ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+            title={isAutoSpinning ? 'Pause auto-spin' : 'Start auto-spin'}
+          >
+            {isAutoSpinning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+            <span>Auto</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setIsAutoSpinning(false);
+              updateAngleIndex(currentAngleIndex + 1);
+            }}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 hover:text-slate-900 cursor-pointer"
+            title="Step 45° Clockwise"
+            aria-label="Rotate clockwise"
+          >
+            <RotateCw className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Zoom controls */}
+        <div className="flex items-center gap-1 border-l border-slate-200 pl-2 tabular-nums">
+          <button
+            type="button"
+            onClick={() => setZoomLevel((z) => Math.max(1, z - 0.25))}
+            disabled={zoomLevel <= 1}
+            className="p-1.5 text-slate-500 hover:text-slate-800 disabled:opacity-30 rounded-lg hover:bg-slate-100 cursor-pointer"
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <span className="text-[11px] font-semibold text-slate-600 w-9 text-center">
+            {Math.round(zoomLevel * 100)}%
+          </span>
+          <button
+            type="button"
+            onClick={() => setZoomLevel((z) => Math.min(2.5, z + 0.25))}
+            disabled={zoomLevel >= 2.5}
+            className="p-1.5 text-slate-500 hover:text-slate-800 disabled:opacity-30 rounded-lg hover:bg-slate-100 cursor-pointer"
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
+          {zoomLevel > 1 && (
+            <button
+              type="button"
+              onClick={() => setZoomLevel(1)}
+              className="text-[10px] text-slate-400 hover:text-slate-700 font-medium px-1.5 py-0.5 rounded hover:bg-slate-100 cursor-pointer"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

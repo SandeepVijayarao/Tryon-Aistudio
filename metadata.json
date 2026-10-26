@@ -1,0 +1,6 @@
+{
+  "name": "Tryon - 360° Fit & Garment Spin",
+  "description": "Calculates true garment fit from body measurements and size charts, rendering an interactive 360° turntable spin.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
