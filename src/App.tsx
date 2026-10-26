@@ -7,7 +7,6 @@ import { HomeStyleAndShopFeed } from './components/HomeStyleAndShopFeed.tsx';
 import { BodyProfileWorkspace } from './components/BodyProfileWorkspace.tsx';
 import { GarmentSpecDrawer } from './components/GarmentSpecDrawer.tsx';
 import { MultiAgentSwarmPanel } from './components/MultiAgentSwarmPanel.tsx';
-import { HackathonPresentationView } from './components/HackathonPresentationView.tsx';
 import {
   CutType,
   FabricType,
@@ -42,7 +41,6 @@ import {
   Layers,
   Cpu,
   ArrowRight,
-  Presentation,
 } from 'lucide-react';
 
 const ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
@@ -296,22 +294,27 @@ export default function App() {
     return 'top';
   };
 
-  // High-Speed Parallel 360° Spin Generation (supports explicit garment overrides for instant Try-On)
+  // High-Speed Parallel 360° Spin Generation (supports explicit garment & slot overrides for instant Try-On)
   const generateSpinForSize = async (
     size: string,
     currentAnalysis: FitAnalysis,
     forceRegenerate = false,
     overrideGarment?: {
       id: string;
+      name?: string;
+      slot?: OutfitSlotType;
       frontImage?: string;
       backImage?: string;
       details?: string;
     }
   ) => {
     const targetId = overrideGarment?.id || activeGarmentId;
+    const targetName = overrideGarment?.name || garmentName;
+    const targetSlot = overrideGarment?.slot || activeOutfitSlotType || 'top';
     const targetFront = overrideGarment?.frontImage || garmentFront;
     const targetBack = overrideGarment?.backImage || garmentBack || targetFront;
-    const targetDetails = overrideGarment?.details !== undefined ? overrideGarment.details : garmentDetails;
+    const targetDetails =
+      overrideGarment?.details !== undefined ? overrideGarment.details : garmentDetails;
 
     const cacheKey = getGarmentSpinCacheKey(targetId, size);
     if (
@@ -334,6 +337,11 @@ export default function App() {
     }));
     setSpinsCache((prev) => ({ ...prev, [cacheKey]: initialFrames }));
 
+    setIsProcessing(true);
+    setProcessingMessage(
+      `Synthesizing 360° Try-On for ${targetName} (Size ${size})...`
+    );
+
     try {
       const [frontData, backData] = await Promise.all([
         fetch('/api/generate-spin-frame', {
@@ -348,6 +356,7 @@ export default function App() {
             garmentBackImage: targetBack || targetFront || savedProfile.frontImage,
             promptFitText,
             garmentDetails: targetDetails,
+            garmentSlot: targetSlot,
             size,
             fallbackSvg: activePreset.framesBySize[size]?.[0] || savedProfile.frontImage,
           }),
@@ -364,6 +373,7 @@ export default function App() {
             garmentBackImage: targetBack || targetFront || savedProfile.frontImage,
             promptFitText,
             garmentDetails: targetDetails,
+            garmentSlot: targetSlot,
             size,
             fallbackSvg:
               activePreset.framesBySize[size]?.[4] ||
@@ -373,17 +383,33 @@ export default function App() {
         }).then((r) => r.json()),
       ]);
 
-      const frontKeyframeUrl = frontData.imageUrl;
-      const backKeyframeUrl = backData.imageUrl;
+      const frontKeyframeUrl =
+        frontData?.imageUrl || activePreset.framesBySize[size]?.[0] || savedProfile.frontImage;
+      const backKeyframeUrl =
+        backData?.imageUrl || activePreset.framesBySize[size]?.[4] || frontKeyframeUrl;
 
       setSpinsCache((prev) => {
-        const updated = [...(prev[cacheKey] || initialFrames)];
-        const idx0 = updated.findIndex((f) => f.angle === 0);
-        if (idx0 !== -1)
-          updated[idx0] = { ...updated[idx0], imageUrl: frontKeyframeUrl, status: 'ready' };
-        const idx180 = updated.findIndex((f) => f.angle === 180);
-        if (idx180 !== -1)
-          updated[idx180] = { ...updated[idx180], imageUrl: backKeyframeUrl, status: 'ready' };
+        const updated = [...(prev[cacheKey] || initialFrames)].map((frame) => {
+          const isRearHemisphere =
+            frame.angle === 135 || frame.angle === 180 || frame.angle === 225;
+          if (computeMode === 'low') {
+            return {
+              ...frame,
+              imageUrl: isRearHemisphere ? backKeyframeUrl : frontKeyframeUrl,
+              status: 'ready' as const,
+            };
+          }
+          if (frame.angle === 0) {
+            return { ...frame, imageUrl: frontKeyframeUrl, status: 'ready' as const };
+          }
+          if (frame.angle === 180) {
+            return { ...frame, imageUrl: backKeyframeUrl, status: 'ready' as const };
+          }
+          return {
+            ...frame,
+            imageUrl: isRearHemisphere ? backKeyframeUrl : frontKeyframeUrl,
+          };
+        });
         return { ...prev, [cacheKey]: updated };
       });
 
@@ -394,8 +420,8 @@ export default function App() {
       const inBetweenAngles = [45, 90, 135, 225, 270, 315];
       await Promise.all(
         inBetweenAngles.map(async (angle) => {
-          const frameIdx = ANGLES.indexOf(angle);
-          const fallback = activePreset.framesBySize[size]?.[frameIdx] || frontKeyframeUrl;
+          const isRearHemisphere = angle === 135 || angle === 225;
+          const fallback = isRearHemisphere ? backKeyframeUrl : frontKeyframeUrl;
 
           const res = await fetch('/api/generate-spin-frame', {
             method: 'POST',
@@ -411,6 +437,7 @@ export default function App() {
               backKeyframe: backKeyframeUrl,
               promptFitText,
               garmentDetails: targetDetails,
+              garmentSlot: targetSlot,
               size,
               fallbackSvg: fallback,
             }),
@@ -421,7 +448,11 @@ export default function App() {
             const updated = [...(prev[cacheKey] || initialFrames)];
             const idx = updated.findIndex((f) => f.angle === angle);
             if (idx !== -1) {
-              updated[idx] = { ...updated[idx], imageUrl: frameData.imageUrl, status: 'ready' };
+              updated[idx] = {
+                ...updated[idx],
+                imageUrl: frameData?.imageUrl || fallback,
+                status: 'ready',
+              };
             }
             return { ...prev, [cacheKey]: updated };
           });
@@ -429,19 +460,26 @@ export default function App() {
       );
     } catch (frameErr) {
       console.warn('Error during parallel frame generation:', frameErr);
+    } finally {
+      setIsProcessing(false);
+      setProcessingMessage('');
     }
   };
 
   // Try on an Existing Wardrobe Item in 360° Studio
-  const handleTryOnExistingItem = (item: ExistingWardrobeItem) => {
+  const handleTryOnExistingItem = (item: ExistingWardrobeItem, outfitContext?: string) => {
     const t0 = performance.now();
+    const slotType = mapCategoryToSlotType(item.category);
     setActiveGarmentId(item.id);
-    setActiveOutfitSlotType(mapCategoryToSlotType(item.category));
+    setActiveOutfitSlotType(slotType);
     setGarmentFront(item.frontImage);
     setGarmentBack(item.backImage || item.frontImage);
     setGarmentUrl(item.garmentUrl || '');
     const fullName = `${item.brand} — ${item.name}`;
-    const detailsText = `${fullName}. ${item.notes || `${item.category} (${item.color})`}`;
+    const baseDetails = `${fullName}. ${item.notes || `${item.category} (${item.color})`}`;
+    const detailsText = outfitContext
+      ? `${baseDetails}. Styled in complete 5-piece outfit: ${outfitContext}`
+      : baseDetails;
     setGarmentName(fullName);
     setGarmentDetails(detailsText);
     setCut(item.cut);
@@ -482,6 +520,8 @@ export default function App() {
     } else {
       void generateSpinForSize(recSize, newAnalysis, false, {
         id: item.id,
+        name: fullName,
+        slot: slotType,
         frontImage: item.frontImage,
         backImage: item.backImage || item.frontImage,
         details: detailsText,
@@ -499,7 +539,8 @@ export default function App() {
       (product.fabric === 'stretch_knit' ||
         product.title.toLowerCase().includes('tee') ||
         product.title.toLowerCase().includes('crew'));
-    setActiveOutfitSlotType(isLayering ? 'layering' : 'top');
+    const slotType: OutfitSlotType = isLayering ? 'layering' : 'top';
+    setActiveOutfitSlotType(slotType);
     setGarmentFront(product.frontImage);
     setGarmentBack(product.backImage || product.frontImage);
     setGarmentUrl(product.productUrl);
@@ -573,6 +614,8 @@ export default function App() {
     } else {
       void generateSpinForSize(recSize, newAnalysis, false, {
         id: product.id,
+        name: fullName,
+        slot: slotType,
         frontImage: product.frontImage,
         backImage: product.backImage || product.frontImage,
         details: fullDetails,
@@ -596,7 +639,7 @@ export default function App() {
       return;
     }
     if (piece.closetItem) {
-      handleTryOnExistingItem(piece.closetItem);
+      handleTryOnExistingItem(piece.closetItem, outfitSummary);
       return;
     }
 
@@ -626,9 +669,15 @@ export default function App() {
     const recSize = newAnalysis.trueSize || 'M';
     setAnalysis(newAnalysis);
     setSelectedSize(recSize);
+    setFittedGarmentsCount((c) => c + 1);
+
+    setActiveTab('studio');
+    scrollToTopSmooth();
 
     void generateSpinForSize(recSize, newAnalysis, false, {
       id: slotId,
+      name: fullName,
+      slot: piece.slot,
       frontImage: piece.imageUrl,
       backImage: piece.imageUrl,
       details: fullDetails,
@@ -645,8 +694,6 @@ export default function App() {
       focusSlot ||
       (pairing.slots.top.source === 'Shop Match' ? pairing.slots.top : pairing.slots.layering);
     handleSelectOutfitSlotPiece(targetPiece, pairing);
-    setActiveTab('studio');
-    scrollToTopSmooth();
   };
 
   const handleImportGarmentUrl = async (overrideUrl?: string) => {
@@ -931,17 +978,6 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setActiveTab('pitch');
-                    scrollToTopSmooth();
-                  }}
-                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 text-xs font-bold transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <Presentation className="w-3.5 h-3.5" />
-                  <span>Shack15 Pitch Deck</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
                     setActiveTab('agents');
                     scrollToTopSmooth();
                   }}
@@ -986,18 +1022,6 @@ export default function App() {
             onDeployOutfitToTurntable={(pairing, focusSlot) =>
               handleTryOnCompleteOutfit(pairing, focusSlot)
             }
-          />
-        )}
-
-        {/* VIEW 1C: SHACK15 SF HACKATHON PRESENTATION DECK */}
-        {activeTab === 'pitch' && (
-          <HackathonPresentationView
-            measurements={savedProfile.measurements}
-            heightCm={savedProfile.heightCm}
-            onNavigateTab={(tab) => {
-              setActiveTab(tab);
-              scrollToTopSmooth();
-            }}
           />
         )}
 

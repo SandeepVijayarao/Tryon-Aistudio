@@ -529,14 +529,17 @@ export const MultiAgentSwarmPanel: React.FC<MultiAgentSwarmPanelProps> = ({
           </div>
         </div>
 
-        {/* Interactive Three.js 3D Procedural Garment & 5-Piece Mannequin World */}
+        {/* Interactive Three.js 3D Walk-In Closet Room & 5-Piece Mannequin World */}
         <ThreeGarmentWorldScene
           measurements={measurements}
           heightCm={heightCm}
           recommendedSize={swarmResult.worldModel.recommendedTrueSize}
           activePass={activeIteration}
           allPasses={swarmResult.renderCritiqueLoop.iterations}
-          onSelectPass={(passNum) => setSelectedLoopPass(passNum)}
+          onSelectPass={(passNum: number) => setSelectedLoopPass(passNum)}
+          existingWardrobe={existingWardrobe}
+          shopCatalog={shopCatalog}
+          activeOutfit={swarmResult.recommendedOutfits[0]}
         />
 
         {/* Selected Iteration Breakdown + 5-Axis Improvement Table */}

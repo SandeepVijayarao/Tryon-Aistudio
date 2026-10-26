@@ -1083,7 +1083,7 @@ ${sidePrompt}`;
   }
 });
 
-// 3. 360° spin frame generation endpoint (supports remote Shopify CDN images + caching)
+// 3. 360° spin frame generation endpoint (supports remote Shopify CDN images, SVG closet items + caching)
 app.post('/api/generate-spin-frame', async (req, res) => {
   const start = Date.now();
   try {
@@ -1098,15 +1098,20 @@ app.post('/api/generate-spin-frame', async (req, res) => {
       backKeyframe,
       promptFitText,
       garmentDetails,
+      garmentSlot,
       size,
       fallbackSvg,
     } = req.body;
 
-    const frameCacheKey = `spin_frame_${hashPayload({
+    // Hash full garment identity (including full image URL/data, details, and slot) so different items never collide
+    const frameCacheKey = `spin_frame_v2_${hashPayload({
       angle,
       size,
-      garmentFrontImage: String(garmentFrontImage || '').slice(0, 180),
-      promptFitText,
+      garmentSlot: garmentSlot || 'top',
+      garmentFrontHash: hashPayload(String(garmentFrontImage || '')),
+      garmentBackHash: hashPayload(String(garmentBackImage || '')),
+      garmentDetails: String(garmentDetails || ''),
+      promptFitText: String(promptFitText || ''),
     })}`;
     const cachedFrame = getCached<any>(frameCacheKey);
     if (cachedFrame) {
@@ -1117,7 +1122,18 @@ app.post('/api/generate-spin-frame', async (req, res) => {
       try {
         let prompt = '';
         const parts: any[] = [];
-        const garmentDesc = garmentDetails ? `Garment details: ${garmentDetails}.` : '';
+        const garmentDesc = garmentDetails ? `${garmentDetails}` : 'tailored menswear garment';
+        const slotType = String(garmentSlot || 'top');
+        const slotTargetText =
+          slotType === 'bottom'
+            ? 'trousers/pants on the lower body'
+            : slotType === 'watch'
+              ? 'wristwatch on the wrist'
+              : slotType === 'shoes'
+                ? 'footwear/shoes on the feet'
+                : slotType === 'layering'
+                  ? 'inner shirt/knitwear layer on the upper torso'
+                  : 'jacket/overshirt/top on the upper body';
 
         const effectiveShopperFront =
           typeof shopperFrontImage === 'string' &&
@@ -1136,53 +1152,62 @@ app.post('/api/generate-spin-frame', async (req, res) => {
         if (angle === 0) {
           const [shopperP, garmentP] = await Promise.all([
             resolveImageInput(effectiveShopperFront),
-            resolveImageInput(garmentFrontImage || effectiveShopperFront),
+            resolveImageInput(garmentFrontImage || ''),
           ]);
           if (shopperP.data && isSupportedRasterMime(shopperP.mimeType)) {
             parts.push({ inlineData: { mimeType: shopperP.mimeType, data: shopperP.data } });
-            if (
-              garmentP.data &&
+            const hasRasterGarment =
+              Boolean(garmentP.data) &&
               garmentFrontImage !== effectiveShopperFront &&
-              isSupportedRasterMime(garmentP.mimeType)
-            ) {
+              isSupportedRasterMime(garmentP.mimeType);
+
+            if (hasRasterGarment) {
               parts.push({ inlineData: { mimeType: garmentP.mimeType, data: garmentP.data } });
+              prompt = `Virtual Try-On Studio Task: Image 1 is the shopper standing in a studio. Image 2 is the new garment to try on (${garmentDesc}). Generate a photorealistic full-body 3:4 front-view (0°) studio photo of the exact person from Image 1 wearing the garment from Image 2. Replace their current ${slotTargetText} with the exact garment from Image 2, matching its color, fabric texture, collar, pocket layout, and silhouette. Keep the person's face, beard, hairstyle, body proportions, full-body standing pose, and neutral studio background unchanged. ${promptFitText}`;
+            } else {
+              prompt = `Virtual Try-On Studio Task: Image 1 is the shopper standing in a studio. Generate a photorealistic full-body 3:4 front-view (0°) studio photo of this exact person wearing: ${garmentDesc}. Replace their current ${slotTargetText} so "${garmentDesc}" is clearly worn and accurately fitted (${promptFitText}). Keep the person's face, beard, hairstyle, body proportions, full-body standing pose, and neutral studio background unchanged.`;
             }
-            prompt = `Dress this exact person in this garment and outfit. Keep the person's face, beard, hair, body shape, pose, background and studio lighting unchanged. Match the garment's exact color, fabric texture, collar, buttons, pockets and construction details. ${garmentDesc} ${promptFitText}`;
           }
         } else if (angle === 180) {
           const [shopperP, garmentP] = await Promise.all([
             resolveImageInput(effectiveShopperBack),
-            resolveImageInput(garmentBackImage || garmentFrontImage || effectiveShopperBack),
+            resolveImageInput(garmentBackImage || garmentFrontImage || ''),
           ]);
           if (shopperP.data && isSupportedRasterMime(shopperP.mimeType)) {
             parts.push({ inlineData: { mimeType: shopperP.mimeType, data: shopperP.data } });
-            if (
-              garmentP.data &&
-              garmentBackImage &&
-              garmentBackImage !== effectiveShopperBack &&
-              isSupportedRasterMime(garmentP.mimeType)
-            ) {
+            const hasRasterGarment =
+              Boolean(garmentP.data) &&
+              (garmentBackImage || garmentFrontImage) !== effectiveShopperBack &&
+              isSupportedRasterMime(garmentP.mimeType);
+
+            if (hasRasterGarment) {
               parts.push({ inlineData: { mimeType: garmentP.mimeType, data: garmentP.data } });
+              prompt = `Virtual Try-On Studio Task: Image 1 is the rear view (180°) of the shopper standing in a studio. Image 2 is the garment being worn (${garmentDesc}). Generate a photorealistic full-body 3:4 rear-view (180°) studio photo of this exact person wearing the garment from Image 2 (${garmentDesc}) from the back. Keep head, body shape, standing pose, and studio background unchanged. ${promptFitText}`;
+            } else {
+              prompt = `Virtual Try-On Studio Task: Image 1 is the rear view (180°) of the shopper standing in a studio. Generate a photorealistic full-body 3:4 rear-view (180°) studio photo of this exact person wearing: ${garmentDesc}. Replace their current ${slotTargetText} with "${garmentDesc}" (${promptFitText}) while keeping head, body shape, standing pose, and studio background unchanged.`;
             }
-            prompt = `Show this exact same person wearing this exact same garment and outfit from the back (180° rear turntable view), standing straight with back turned squarely to the camera. Keep head, body shape, pose, plain studio background and lighting unchanged. ${garmentDesc} ${promptFitText}`;
           }
         } else {
           const [frontRef, backRef] = await Promise.all([
-            resolveImageInput(frontKeyframe || shopperFrontImage),
-            resolveImageInput(backKeyframe || shopperBackImage || shopperFrontImage),
+            resolveImageInput(frontKeyframe || effectiveShopperFront),
+            resolveImageInput(backKeyframe || effectiveShopperBack),
           ]);
-          if (frontRef.data) {
+          if (frontRef.data && isSupportedRasterMime(frontRef.mimeType)) {
             parts.push({ inlineData: { mimeType: frontRef.mimeType, data: frontRef.data } });
-            if (backRef.data && backKeyframe !== frontKeyframe) {
+            if (
+              backRef.data &&
+              backKeyframe !== frontKeyframe &&
+              isSupportedRasterMime(backRef.mimeType)
+            ) {
               parts.push({ inlineData: { mimeType: backRef.mimeType, data: backRef.data } });
             }
             if (shopperSideImage) {
               const sideP = await resolveImageInput(shopperSideImage);
-              if (sideP.data) {
+              if (sideP.data && isSupportedRasterMime(sideP.mimeType)) {
                 parts.push({ inlineData: { mimeType: sideP.mimeType, data: sideP.data } });
               }
             }
-            prompt = `Show this exact same person in this exact same outfit and fit, rotated ${angle}° clockwise as on a turntable, same neutral studio background, same lighting, same camera height and distance, full body head to toe. ${garmentDesc} ${promptFitText}`;
+            prompt = `Show this exact same person in this exact same outfit (${garmentDesc}), rotated ${angle}° clockwise on a studio turntable, same neutral studio background, same lighting, full body head to toe. ${promptFitText}`;
           }
         }
 

@@ -6,12 +6,11 @@ import {
   Sparkles,
   Settings,
   Cpu,
-  Presentation,
 } from 'lucide-react';
 import { DEMO_PRESETS, DemoPreset } from '../utils/demoPresets.ts';
 import { BodyMeasurements } from '../types/tryon.ts';
 
-export type WorkspaceTab = 'home' | 'agents' | 'studio' | 'pitch' | 'settings';
+export type WorkspaceTab = 'home' | 'agents' | 'studio' | 'settings';
 
 interface HeaderProps {
   activeTab: WorkspaceTab;
@@ -110,23 +109,6 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
             <span>360° Fitting Studio</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onTabChange('pitch')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
-              activeTab === 'pitch'
-                ? 'bg-indigo-600 text-white shadow-2xs'
-                : 'text-slate-700 hover:text-slate-900'
-            }`}
-          >
-            <Presentation
-              className={`w-3.5 h-3.5 shrink-0 ${
-                activeTab === 'pitch' ? 'text-white' : 'text-amber-600'
-              }`}
-            />
-            <span>Shack15 Pitch Deck</span>
           </button>
 
           <button

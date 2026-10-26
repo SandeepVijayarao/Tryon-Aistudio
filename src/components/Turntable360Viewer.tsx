@@ -178,7 +178,7 @@ export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
     Boolean(garmentFrontImage);
 
   const uniqueUrls = new Set(frames.map((f) => f.imageUrl).filter(Boolean));
-  const isSinglePhotoTurntable = uniqueUrls.size === 1;
+  const isKeyframeTurntable = uniqueUrls.size <= 2;
 
   // Compute style for 3-view composite sheet or multi-angle photorealistic turntable
   const getFrameStyle = (angle: number, imageUrl?: string): React.CSSProperties => {
@@ -234,15 +234,15 @@ export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
       };
     }
 
-    if (isSinglePhotoTurntable) {
+    if (isKeyframeTurntable) {
       const tiltMap: Record<number, string> = {
         0: `perspective(1000px) rotateY(0deg) scaleX(${fitWidthScale})`,
         45: `perspective(1000px) rotateY(-18deg) scaleX(${fitWidthScale * 0.96})`,
-        90: `perspective(1000px) rotateY(-32deg) scaleX(${fitWidthScale * 0.88})`,
-        135: `perspective(1000px) rotateY(22deg) scaleX(${-fitWidthScale * 0.94})`,
-        180: `perspective(1000px) rotateY(0deg) scaleX(${-fitWidthScale})`,
-        225: `perspective(1000px) rotateY(-22deg) scaleX(${-fitWidthScale * 0.94})`,
-        270: `perspective(1000px) rotateY(32deg) scaleX(${-fitWidthScale * 0.88})`,
+        90: `perspective(1000px) rotateY(-30deg) scaleX(${fitWidthScale * 0.90})`,
+        135: `perspective(1000px) rotateY(18deg) scaleX(${fitWidthScale * 0.96})`,
+        180: `perspective(1000px) rotateY(0deg) scaleX(${fitWidthScale})`,
+        225: `perspective(1000px) rotateY(-18deg) scaleX(${fitWidthScale * 0.96})`,
+        270: `perspective(1000px) rotateY(30deg) scaleX(${fitWidthScale * 0.90})`,
         315: `perspective(1000px) rotateY(18deg) scaleX(${fitWidthScale * 0.96})`,
       };
       return { transform: tiltMap[angle] || `scaleX(${fitWidthScale})` };
@@ -404,9 +404,24 @@ export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
             );
           })}
 
+          {/* Instant 3D Anatomical Garment Drape Layer (shown immediately while AI synthesizes or for non-preset pieces) */}
+          {shouldDrapeGarmentOnModel && activeDrapeImage && (
+            <div
+              style={getGarmentDrapeStyle(currentAngle)}
+              className="absolute left-1/2 -translate-x-1/2 z-15 pointer-events-none flex items-center justify-center transition-all duration-200"
+            >
+              <img
+                src={activeDrapeImage}
+                alt={`Draped ${garmentName || 'garment'} at ${currentAngle}°`}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-contain drop-shadow-[0_14px_24px_rgba(15,23,42,0.32)] rounded-xl"
+              />
+            </div>
+          )}
+
           {/* Compact Selected Garment Reference Badge at bottom-left of viewport */}
           {!showOriginalBefore && activeDrapeImage && (
-            <div className="absolute left-3 bottom-12 z-20 pointer-events-none flex items-center gap-2 bg-white/95 backdrop-blur-md p-1.5 pr-2.5 rounded-xl border border-slate-200/90 shadow-xs max-w-[205px]">
+            <div className="absolute left-3 bottom-12 z-20 pointer-events-none flex items-center gap-2 bg-white/95 backdrop-blur-md p-1.5 pr-2.5 rounded-xl border border-slate-200/90 shadow-xs max-w-[215px]">
               <img
                 src={activeDrapeImage}
                 alt={garmentName || 'Active garment'}
@@ -416,8 +431,10 @@ export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
               <div className="min-w-0">
                 <div className="text-[9px] font-bold uppercase tracking-wider text-indigo-600 truncate">
                   {currentFrame?.status === 'generating' || isGenerating
-                    ? 'Fitting on Model...'
-                    : `Fitted · Size ${sizeLabel}`}
+                    ? 'AI Synthesizing Fit...'
+                    : currentFrameIsAiSynthesized
+                      ? `AI Dressed · Size ${sizeLabel}`
+                      : `Fitted · Size ${sizeLabel}`}
                 </div>
                 <div className="text-[11px] font-bold text-slate-900 truncate">
                   {garmentName?.split('—').pop()?.trim() || 'Active Piece'}

@@ -12,7 +12,9 @@ import {
   SlidersHorizontal,
   Globe,
   Check,
+  Box,
 } from 'lucide-react';
+import { ThreeGarmentWorldScene } from './ThreeGarmentWorldScene.tsx';
 import {
   BodyMeasurements,
   CutType,
@@ -101,8 +103,10 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
   const [flippedCardIds, setFlippedCardIds] = useState<Record<string, boolean>>({});
   const [savedToWardrobeIds, setSavedToWardrobeIds] = useState<Record<string, boolean>>({});
 
-  // Add Existing Clothing Modal/Drawer State
+  // Add Existing Clothing Modal/Drawer State & 3D Walk-In Closet Room Toggle
   const [showAddWardrobeForm, setShowAddWardrobeForm] = useState<boolean>(false);
+  const [show3DClosetRoom, setShow3DClosetRoom] = useState<boolean>(true);
+  const [closetPassIndex, setClosetPassIndex] = useState<number>(2);
   const [newWardrobeName, setNewWardrobeName] = useState<string>('');
   const [newWardrobeBrand, setNewWardrobeBrand] = useState<string>('');
   const [newWardrobeCategory, setNewWardrobeCategory] =
@@ -543,15 +547,48 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowAddWardrobeForm(!showAddWardrobeForm)}
-            className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 self-start sm:self-center shrink-0 transition-colors cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5 text-indigo-600" />
-            <span>{showAddWardrobeForm ? 'Cancel' : 'Add Existing Clothing Piece'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-center shrink-0">
+            <button
+              type="button"
+              onClick={() => setShow3DClosetRoom((prev) => !prev)}
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                show3DClosetRoom
+                  ? 'bg-slate-900 text-white shadow-2xs'
+                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200'
+              }`}
+            >
+              <Box className="w-3.5 h-3.5 text-amber-400" />
+              <span>{show3DClosetRoom ? 'Hide 3D Walk-In Closet Room' : 'Open 3D Walk-In Closet Room'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowAddWardrobeForm(!showAddWardrobeForm)}
+              className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 text-indigo-600" />
+              <span>{showAddWardrobeForm ? 'Cancel' : 'Add Existing Clothing Piece'}</span>
+            </button>
+          </div>
         </div>
+
+        {/* Interactive 3D Walk-In Closet Room with Dedicated Architectural Sections */}
+        {show3DClosetRoom && (
+          <div className="space-y-2">
+            <ThreeGarmentWorldScene
+              measurements={measurements}
+              heightCm={heightCm}
+              trueSize={stylePairings[0]?.shopTrueSize || 'M'}
+              activePassIndex={closetPassIndex}
+              onSelectPassIndex={setClosetPassIndex}
+              activeOutfit={stylePairings[0]}
+              existingWardrobe={existingWardrobe}
+              shopCatalog={products}
+              onTryOnClosetItem={onTryOnExistingItem}
+              onTryOnShopProduct={onTryOnShopProduct}
+            />
+          </div>
+        )}
 
         {/* Inline Add Existing Wardrobe Piece Form */}
         {showAddWardrobeForm && (
