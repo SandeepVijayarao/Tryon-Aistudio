@@ -717,7 +717,7 @@ export const Turntable360Viewer: React.FC<Turntable360ViewerProps> = ({
               }}
               disabled={isGenerating}
               className="pointer-events-auto bg-white/95 hover:bg-white text-slate-900 border border-slate-200/80 shadow-xs px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer shrink-0"
-              title="Synthesize fresh 360° frames with Gemini Image model"
+              title="Synthesize fresh 360° turntable frames for this size"
             >
               <Sparkles className="w-3 h-3 text-indigo-600" />
               <span>{isGenerating ? 'Fitting...' : 'AI Fit ' + sizeLabel}</span>

@@ -190,7 +190,7 @@ export const PhotoSlot: React.FC<PhotoSlotProps> = ({
           {isValidating ? (
             <div className="flex items-center gap-2 text-xs text-indigo-600 bg-indigo-50/70 px-2.5 py-1.5 rounded-lg border border-indigo-100">
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              <span>Validating with Gemini...</span>
+              <span>Verifying photo framing &amp; posture...</span>
             </div>
           ) : validation ? (
             validation.valid ? (

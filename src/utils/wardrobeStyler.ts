@@ -7,6 +7,16 @@ import {
 } from '../types/tryon.ts';
 import { DEFAULT_SIZE_CHART, analyzeFit } from './fitMath.ts';
 import { DEMO_PRESETS } from './demoPresets.ts';
+import {
+  DiscoveryMode,
+  OccasionContext,
+  OutfitHarmonyBreakdown,
+  RecommendationFeedbackEvent,
+  evaluateCompleteOutfitHarmony,
+  evaluateWardrobeSynergyAndGap,
+  rankShopCatalogForUser,
+} from './recommendationEngine.ts';
+import { buildSizeSpecificProductUrl } from './productLinkFetcher.ts';
 
 export type WardrobeCategory =
   | 'Blazer'
@@ -60,6 +70,8 @@ export interface StylePairingRecommendation {
   shopTrueSize: string;
   shopChestEaseCm: number;
   whyItWorks: string;
+  matchScore?: number;
+  harmonyBreakdown?: OutfitHarmonyBreakdown;
   slots: {
     top: OutfitSlotPiece;
     layering: OutfitSlotPiece;
@@ -246,6 +258,7 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
     fabric: 'stretch_knit',
     ownedSize: 'M',
     sizeChart: DEFAULT_SIZE_CHART,
+    garmentUrl: 'https://kotn.com/collections/mens-tshirts',
     notes: '240gsm Egyptian cotton base layer in your closet',
   },
   {
@@ -259,6 +272,7 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
     fabric: 'woven',
     ownedSize: 'EU 50 / 34"',
     sizeChart: DEFAULT_SIZE_CHART,
+    garmentUrl: 'https://www.zara.com/us/en/man-trousers-l838.html',
     notes: 'Mid-rise tailored trousers calibrated for 95 cm waist',
   },
   {
@@ -272,6 +286,7 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
     fabric: 'woven',
     ownedSize: '40mm Case',
     sizeChart: DEFAULT_SIZE_CHART,
+    garmentUrl: 'https://www.tissotwatches.com/en-us/men.html',
     notes: '47mm lug-to-lug clears shirt and blazer cuffs cleanly',
   },
   {
@@ -285,6 +300,7 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
     fabric: 'woven',
     ownedSize: 'EU 43 / US 10',
     sizeChart: DEFAULT_SIZE_CHART,
+    garmentUrl: 'https://www.morjas.com/product/the-penny-loafer-brown-suede/',
     notes: 'Unlined suede vamp with low-profile leather sole',
   },
   {
@@ -299,6 +315,7 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
     fabric: DEMO_PRESETS[1].fabric,
     ownedSize: 'M',
     sizeChart: DEMO_PRESETS[1].sizeChart,
+    garmentUrl: DEMO_PRESETS[1].garmentUrl || 'https://www.taylorstitch.com/collections/mens-shirts',
     notes: 'Breathable woven layer with +10 cm relaxed cut allowance',
   },
 ];
@@ -306,29 +323,39 @@ export const DEFAULT_EXISTING_WARDROBE: ExistingWardrobeItem[] = [
 /**
  * Generates curated 5-piece head-to-toe style recommendations (Top/Outer, Layering T-Shirt,
  * Bottom, Watch, and Shoes) that combine the user's existing clothing with live, in-stock
- * shop garments pre-fitted to their saved BodyMeasurements.
+ * shop garments pre-fitted to their saved BodyMeasurements and ranked via the
+ * Amazon + Spotify hybrid recommendation engine (MMR diversity + Taste DNA + Layering Physics).
  */
 export function buildStyleAndShopPairings(
   existingWardrobe: ExistingWardrobeItem[],
   shopCatalog: ShoppingProduct[],
   measurements: BodyMeasurements,
-  searchQuery = ''
+  searchQuery = '',
+  options: {
+    occasion?: OccasionContext;
+    discoveryMode?: DiscoveryMode;
+    feedbackEvents?: RecommendationFeedbackEvent[];
+  } = {}
 ): StylePairingRecommendation[] {
   if (existingWardrobe.length === 0 || shopCatalog.length === 0) {
     return [];
   }
 
-  const q = searchQuery.trim().toLowerCase();
-  const availableShop = shopCatalog.filter((p) => p.available && p.availableSizes.length > 0);
-  if (availableShop.length === 0) return [];
+  // Stage 1-5: Rank shop catalog using Gaussian Fit, Closet Synergy, Taste DNA, and MMR Diversity
+  const { ranked } = rankShopCatalogForUser(
+    shopCatalog,
+    measurements,
+    existingWardrobe,
+    options.feedbackEvents || [],
+    {
+      searchQuery,
+      occasion: options.occasion || 'all',
+      discoveryMode: options.discoveryMode || 'balanced',
+      mmrLambda: searchQuery.trim() ? 0.92 : 0.74,
+    }
+  );
 
-  // Rank shop items by query if present
-  const sortedShop = [...availableShop].sort((a, b) => {
-    if (!q) return 0;
-    const aMatch = `${a.title} ${a.brand} ${a.category} ${a.details}`.toLowerCase().includes(q) ? 1 : 0;
-    const bMatch = `${b.title} ${b.brand} ${b.category} ${b.details}`.toLowerCase().includes(q) ? 1 : 0;
-    return bMatch - aMatch;
-  });
+  if (ranked.length === 0) return [];
 
   // Find closet pieces by category
   const closetTops = existingWardrobe.filter(
@@ -348,11 +375,35 @@ export function buildStyleAndShopPairings(
   const pairings: StylePairingRecommendation[] = [];
   const usedShopIds = new Set<string>();
 
-  const occasions = [
-    'Smart Tailored Layering',
-    'Elevated Weekend Proportions',
-    'Relaxed Knit & Structure',
-  ];
+  const occasionLabelsByContext: Record<OccasionContext, string[]> = {
+    all: [
+      'Smart Tailored Layering',
+      'Elevated Weekend Proportions',
+      'Relaxed Knit & Structure',
+    ],
+    smart_tailored: [
+      'Architectural Smart Tailoring',
+      'Executive Unstructured Layering',
+      'Refined Evening Tailoring',
+    ],
+    weekend_atelier: [
+      'Elevated Weekend Proportions',
+      'Tactile Hemp & Supima Layering',
+      'Off-Duty Atelier Drape',
+    ],
+    creative_office: [
+      'Creative Studio Tailoring',
+      'Textured Smart-Casual Balance',
+      'Modern Workwear Proportions',
+    ],
+    evening_minimal: [
+      'Monochrome Evening Minimal',
+      'Tonal Slate & Ecru Tailoring',
+      'After-Hours Structured Layering',
+    ],
+  };
+
+  const occasions = occasionLabelsByContext[options.occasion || 'all'];
 
   // Curated complementary Bottoms, Watches, and Shoes when rotating across the 3 full outfits
   const curatedBottoms = [
@@ -364,6 +415,7 @@ export function buildStyleAndShopPairings(
       fitNote: `Calibrated for ${measurements.waist} cm waist & ${measurements.hip} cm hip (+4 cm seat ease)`,
       price: closetBottoms[0] ? undefined : '119.00',
       imageUrl: closetBottoms[0]?.frontImage || STUDIO_OUTFIT_SVGS.charcoalTrousers,
+      productUrl: closetBottoms[0]?.garmentUrl || 'https://www.zara.com/us/en/man-trousers-l838.html',
       closetItem: closetBottoms[0],
     },
     {
@@ -396,6 +448,7 @@ export function buildStyleAndShopPairings(
       sizeOrSpec: '40mm · 11mm Slim Case',
       fitNote: '47mm lug-to-lug slips cleanly under blazer & shirt cuffs',
       imageUrl: closetWatches[0]?.frontImage || STUDIO_OUTFIT_SVGS.chronographWatch,
+      productUrl: closetWatches[0]?.garmentUrl || 'https://www.tissotwatches.com/en-us/men.html',
       closetItem: closetWatches[0],
     },
     {
@@ -406,6 +459,7 @@ export function buildStyleAndShopPairings(
       fitNote: 'Lightweight field case complements textured hemp & linen weaves',
       price: '595.00',
       imageUrl: STUDIO_OUTFIT_SVGS.fieldWatch,
+      productUrl: 'https://www.hamiltonwatch.com/en-us/khaki-field',
     },
     {
       name: '39mm Sunray Blue Automatic Dress Watch',
@@ -415,6 +469,7 @@ export function buildStyleAndShopPairings(
       fitNote: 'Balanced dial proportion for rolled sleeves or knit cuffs',
       price: '450.00',
       imageUrl: STUDIO_OUTFIT_SVGS.steelDressWatch,
+      productUrl: 'https://www.seikowatches.com/us-en/products/presage',
     },
   ];
 
@@ -426,6 +481,7 @@ export function buildStyleAndShopPairings(
       sizeOrSpec: closetShoes[0]?.ownedSize || 'EU 43 / US 10',
       fitNote: 'Almond toe elongates tailored trouser line with zero break',
       imageUrl: closetShoes[0]?.frontImage || STUDIO_OUTFIT_SVGS.suedeLoafers,
+      productUrl: closetShoes[0]?.garmentUrl || 'https://www.morjas.com/product/the-penny-loafer-brown-suede/',
       closetItem: closetShoes[0],
     },
     {
@@ -436,6 +492,7 @@ export function buildStyleAndShopPairings(
       fitNote: 'Clean tonal cupsole anchors relaxed overshirt & chino proportions',
       price: '215.00',
       imageUrl: STUDIO_OUTFIT_SVGS.minimalistSneakers,
+      productUrl: 'https://www.jakshoes.com/collections/men',
     },
     {
       name: 'Goodyear-Welted Chromexcel Service Boots',
@@ -445,26 +502,38 @@ export function buildStyleAndShopPairings(
       fitNote: 'Structured heel counter balances heavy knitwear & selvedge denim',
       price: '380.00',
       imageUrl: STUDIO_OUTFIT_SVGS.serviceBoots,
+      productUrl: 'https://www.grantstoneshoes.com/collections/boots',
     },
   ];
 
   for (let i = 0; i < 3; i++) {
-    const primaryCloset = (closetTops[i % Math.max(1, closetTops.length)] ||
+    const fallbackCloset = (closetTops[i % Math.max(1, closetTops.length)] ||
       existingWardrobe[i % existingWardrobe.length])!;
 
-    const candidates = sortedShop.filter(
-      (p) =>
-        p.productUrl !== primaryCloset.garmentUrl &&
-        !usedShopIds.has(p.id) &&
+    const candidateRecs = ranked.filter(
+      (r) =>
+        r.product.productUrl !== fallbackCloset.garmentUrl &&
+        !usedShopIds.has(r.product.id) &&
         !existingWardrobe.some(
           (w) =>
-            (w.garmentUrl && w.garmentUrl === p.productUrl) ||
-            w.name.toLowerCase().includes(p.title.toLowerCase())
+            (w.garmentUrl && w.garmentUrl === r.product.productUrl) ||
+            w.name.toLowerCase().includes(r.product.title.toLowerCase())
         )
     );
-    const shopPiece = candidates[0] || sortedShop[i % sortedShop.length];
-    if (!shopPiece) continue;
+    const chosenRec = candidateRecs[0] || ranked[i % ranked.length];
+    if (!chosenRec) continue;
+
+    const shopPiece = chosenRec.product;
     usedShopIds.add(shopPiece.id);
+
+    // Pair with the highest-synergy upper-body closet item if available, or fallbackCloset
+    const primaryCloset =
+      chosenRec.bestClosetMatch &&
+      (chosenRec.bestClosetMatch.category === 'Blazer' ||
+        chosenRec.bestClosetMatch.category === 'Overshirt' ||
+        chosenRec.bestClosetMatch.category === 'Shirt')
+        ? chosenRec.bestClosetMatch
+        : fallbackCloset;
 
     const fit = analyzeFit({
       measurements,
@@ -473,9 +542,9 @@ export function buildStyleAndShopPairings(
       fabric: shopPiece.fabric,
     });
 
-    const trueSize = fit.trueSize || 'M';
+    const trueSize = chosenRec.trueSize || fit.trueSize || 'M';
     const sizeRow = fit.sizeResults.find((s) => s.size === trueSize) || fit.sizeResults[2];
-    const chestEase = sizeRow ? sizeRow.chest.ease : 6;
+    const chestEase = sizeRow ? sizeRow.chest.ease : chosenRec.chestEaseCm || 6;
 
     const lowerTitle = shopPiece.title.toLowerCase();
     const isOuterwearPiece =
@@ -494,6 +563,8 @@ export function buildStyleAndShopPairings(
         lowerTitle.includes('polo'));
 
     const closetTee = closetLayering[0];
+
+    const shopDeepLink = buildSizeSpecificProductUrl(shopPiece, trueSize);
 
     const topSlot: OutfitSlotPiece = shopIsBaseOrKnit
       ? {
@@ -518,7 +589,7 @@ export function buildStyleAndShopPairings(
           fitNote: `In-stock ${shopPiece.cut} cut for ${measurements.chest} cm chest`,
           price: shopPiece.price,
           imageUrl: shopPiece.frontImage,
-          productUrl: shopPiece.productUrl,
+          productUrl: shopDeepLink,
           shopProduct: shopPiece,
         };
 
@@ -533,7 +604,7 @@ export function buildStyleAndShopPairings(
           fitNote: `Breathable knit base layer under ${primaryCloset.brand} outer`,
           price: shopPiece.price,
           imageUrl: shopPiece.frontImage,
-          productUrl: shopPiece.productUrl,
+          productUrl: shopDeepLink,
           shopProduct: shopPiece,
         }
       : i === 1
@@ -558,6 +629,7 @@ export function buildStyleAndShopPairings(
             sizeOrSpec: `Size ${closetTee?.ownedSize || trueSize} (+4 cm base ease)`,
             fitNote: '240gsm collar holds structure cleanly beneath lapels',
             imageUrl: closetTee?.frontImage || STUDIO_OUTFIT_SVGS.whiteSupimaTee,
+            productUrl: closetTee?.garmentUrl || 'https://kotn.com/collections/mens-tshirts',
             closetItem: closetTee,
           };
 
@@ -587,6 +659,7 @@ export function buildStyleAndShopPairings(
       fitNote: wtc.fitNote,
       price: wtc.price,
       imageUrl: wtc.imageUrl,
+      productUrl: wtc.productUrl,
       closetItem: wtc.closetItem,
     };
 
@@ -601,8 +674,25 @@ export function buildStyleAndShopPairings(
       fitNote: sho.fitNote,
       price: sho.price,
       imageUrl: sho.imageUrl,
+      productUrl: sho.productUrl,
       closetItem: sho.closetItem,
     };
+
+    const topEase = shopIsBaseOrKnit ? Math.max(7, chestEase + 3) : chestEase;
+    const layerEase = shopIsBaseOrKnit ? chestEase : 4;
+
+    const harmonyBreakdown = evaluateCompleteOutfitHarmony({
+      topTitle: topSlot.name,
+      topBrand: topSlot.brand,
+      topChestEaseCm: topEase,
+      layeringTitle: layeringSlot.name,
+      layeringBrand: layeringSlot.brand,
+      layeringChestEaseCm: layerEase,
+      bottomTitle: bottomSlot.name,
+      watchTitle: watchSlot.name,
+      shoesTitle: shoesSlot.name,
+      shopRec: chosenRec,
+    });
 
     pairings.push({
       id: `pairing-${primaryCloset.id}-${shopPiece.id}-${i}`,
@@ -612,7 +702,9 @@ export function buildStyleAndShopPairings(
       shopComplement: shopPiece,
       shopTrueSize: trueSize,
       shopChestEaseCm: chestEase,
-      whyItWorks: `Complete 5-piece look calibrated for your ${measurements.chest} cm chest and ${measurements.waist} cm waist: pairs ${topSlot.brand}'s ${topSlot.name.split('(')[0].trim()} over ${layeringSlot.brand}'s ${layeringSlot.name.split('(')[0].trim()}, grounded with ${bottomSlot.sizeOrSpec} ${bottomSlot.name.toLowerCase()}, ${watchSlot.sizeOrSpec.split('·')[0].trim()} watch, and ${shoesSlot.name.toLowerCase()}.`,
+      matchScore: harmonyBreakdown.totalMatchScore,
+      harmonyBreakdown,
+      whyItWorks: `Complete 5-piece look (${harmonyBreakdown.totalMatchScore}% Style & Fit Match) calibrated for your ${measurements.chest} cm chest and ${measurements.waist} cm waist: pairs ${topSlot.brand}'s ${topSlot.name.split('(')[0].trim()} over ${layeringSlot.brand}'s ${layeringSlot.name.split('(')[0].trim()}, grounded with ${bottomSlot.sizeOrSpec} ${bottomSlot.name.toLowerCase()}, ${watchSlot.sizeOrSpec.split('·')[0].trim()} watch, and ${shoesSlot.name.toLowerCase()}.`,
       slots: {
         top: topSlot,
         layering: layeringSlot,
@@ -627,7 +719,8 @@ export function buildStyleAndShopPairings(
 }
 
 /**
- * Computes which existing wardrobe piece best complements a given shop product.
+ * Computes which existing wardrobe piece best complements a given shop product
+ * using cross-category collaborative compatibility and color harmony.
  */
 export function findBestWardrobeMatchForProduct(
   product: ShoppingProduct,
@@ -637,8 +730,14 @@ export function findBestWardrobeMatchForProduct(
   const isBlazer =
     product.title.toLowerCase().includes('blazer') ||
     product.category.toLowerCase().includes('blazer');
-  if (isBlazer) {
-    return existingWardrobe.find((w) => w.category !== 'Blazer') || existingWardrobe[0];
+  if (!isBlazer) {
+    const blazer = existingWardrobe.find((w) => w.category === 'Blazer');
+    if (blazer) return blazer;
   }
-  return existingWardrobe.find((w) => w.category === 'Blazer') || existingWardrobe[0];
+  const { bestClosetMatch } = evaluateWardrobeSynergyAndGap(product, existingWardrobe);
+  return (
+    bestClosetMatch ||
+    existingWardrobe.find((w) => (isBlazer ? w.category !== 'Blazer' : w.category === 'Blazer')) ||
+    existingWardrobe[0]
+  );
 }

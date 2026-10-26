@@ -5,12 +5,11 @@ import {
   SlidersHorizontal,
   Sparkles,
   Settings,
-  Cpu,
 } from 'lucide-react';
 import { DEMO_PRESETS, DemoPreset } from '../utils/demoPresets.ts';
 import { BodyMeasurements } from '../types/tryon.ts';
 
-export type WorkspaceTab = 'home' | 'agents' | 'studio' | 'settings';
+export type WorkspaceTab = 'home' | 'studio' | 'settings';
 
 interface HeaderProps {
   activeTab: WorkspaceTab;
@@ -53,11 +52,11 @@ export const Header: React.FC<HeaderProps> = ({
                 <h1 className="text-base font-bold tracking-tight text-slate-900">Tryon</h1>
                 <span className="text-slate-300" aria-hidden="true">·</span>
                 <span className="text-xs font-medium text-slate-600">
-                  Argon 360° Fit &amp; Managed Agents
+                  3D Walk-In Closet &amp; 360° Fitting Room
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 hidden xl:block">
-                Gemini 4 Argon · Three.js 3D World · Omni Video · Calibrate once &amp; fit in &lt;1ms
+                3D Body Twin from Your Photos · Wardrobe Styling &amp; Official Storefront Fit
               </p>
             </div>
           </button>
@@ -79,23 +78,6 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Sparkles className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
             <span>Home: Style &amp; Shop</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onTabChange('agents')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
-              activeTab === 'agents'
-                ? 'bg-slate-900 text-white shadow-2xs'
-                : 'text-slate-700 hover:text-slate-900'
-            }`}
-          >
-            <Cpu
-              className={`w-3.5 h-3.5 shrink-0 ${
-                activeTab === 'agents' ? 'text-indigo-400' : 'text-indigo-600'
-              }`}
-            />
-            <span>Argon Swarm + 3D + Video</span>
           </button>
 
           <button

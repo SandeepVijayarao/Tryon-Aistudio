@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Sparkles,
   Search,
@@ -13,14 +13,26 @@ import {
   Globe,
   Check,
   Box,
+  Heart,
+  X,
+  Compass,
+  RotateCcw,
+  Link2,
+  Lock,
+  Unlock,
+  ArrowUp,
 } from 'lucide-react';
 import { ThreeGarmentWorldScene } from './ThreeGarmentWorldScene.tsx';
 import {
   BodyMeasurements,
   CutType,
   FabricType,
+  PhotoLandmarks,
+  SideLandmarks,
   LiveWebDiscoveryItem,
+  LiveProductFetchResult,
   ShoppingProduct,
+  SpinFrame,
 } from '../types/tryon.ts';
 import {
   ExistingWardrobeItem,
@@ -28,14 +40,40 @@ import {
   StylePairingRecommendation,
   STUDIO_OUTFIT_SVGS,
   buildStyleAndShopPairings,
-  findBestWardrobeMatchForProduct,
 } from '../utils/wardrobeStyler.ts';
 import { evaluateProductFitForUser } from '../utils/shoppingMatcher.ts';
 import { DEFAULT_SIZE_CHART } from '../utils/fitMath.ts';
+import {
+  DiscoveryMode,
+  FeedbackActionType,
+  OccasionContext,
+  RecommendationFeedbackEvent,
+  RecommendationLane,
+  classifyProductCategory,
+  encodeShopProductVector,
+  rankShopCatalogForUser,
+} from '../utils/recommendationEngine.ts';
+import {
+  buildSizeSpecificProductUrl,
+  isDirectProductUrl,
+} from '../utils/productLinkFetcher.ts';
 
 interface HomeStyleAndShopFeedProps {
   measurements: BodyMeasurements;
   heightCm: number;
+  userFrontImage?: string;
+  userBackImage?: string;
+  userSideImage?: string;
+  frontLandmarks?: PhotoLandmarks;
+  backLandmarks?: PhotoLandmarks;
+  sideLandmarks?: SideLandmarks;
+  studioFrames?: SpinFrame[];
+  activeGarmentName?: string;
+  activeGarmentId?: string;
+  garmentFrontImage?: string;
+  garmentBackImage?: string;
+  selectedSize?: string;
+  onPhotoUpload?: (slot: 'front' | 'back' | 'side', dataUrl: string | undefined) => void;
   existingWardrobe: ExistingWardrobeItem[];
   onAddWardrobeItem: (item: ExistingWardrobeItem) => void;
   onTryOnExistingItem: (item: ExistingWardrobeItem) => void;
@@ -57,7 +95,44 @@ const AI_QUERY_SUGGESTIONS = [
   'Tailored outerwear that fits a 99cm chest without pulling at the waist',
 ];
 
+const QUICK_LIVE_FETCH_LINKS = [
+  {
+    label: 'Taylor Stitch Pacific Overshirt',
+    url: 'https://www.taylorstitch.com/products/pacific-overshirt-in-bay-leaf-hemp-canvas-2610',
+  },
+  {
+    label: 'Taylor Stitch Cutter Check',
+    url: 'https://www.taylorstitch.com/products/cutter-overshirt-in-beachwood-check-2611',
+  },
+  {
+    label: 'Zara Comfort Suit Blazer',
+    url: 'https://www.zara.com/us/en/comfort-suit-blazer-p04456999.html',
+  },
+];
+
 const BRAND_FILTERS = ['All', 'ZARA', 'Taylor Stitch', 'Percival London', 'Corridor NYC', 'Kotn'];
+
+const OCCASION_OPTIONS: { id: OccasionContext; label: string }[] = [
+  { id: 'all', label: 'All Occasions' },
+  { id: 'smart_tailored', label: 'Smart Tailoring' },
+  { id: 'weekend_atelier', label: 'Weekend Atelier' },
+  { id: 'creative_office', label: 'Creative Office' },
+  { id: 'evening_minimal', label: 'Evening Minimal' },
+];
+
+const DISCOVERY_MODE_OPTIONS: { id: DiscoveryMode; label: string; hint: string }[] = [
+  { id: 'familiar', label: 'Familiar Favorites', hint: 'Prioritize closet-proven brands & cuts' },
+  { id: 'balanced', label: 'Balanced Curations', hint: 'Optimal blend of fit, synergy & discovery' },
+  { id: 'discovery', label: 'Deep Discovery', hint: 'Explore high-fit new textures & wardrobe gaps' },
+];
+
+const RECOMMENDATION_LANES: { id: RecommendationLane; label: string }[] = [
+  { id: 'all_for_you', label: 'Made For You' },
+  { id: 'proportion_perfect', label: 'Proportion-Perfect Fit' },
+  { id: 'complete_the_look', label: 'Complete Your Closet' },
+  { id: 'wardrobe_gap', label: 'Wardrobe Gap Unlockers' },
+  { id: 'discover_weekly', label: 'Discover Weekly' },
+];
 
 function getDefaultCategoryImage(
   category: ExistingWardrobeItem['category'],
@@ -80,6 +155,19 @@ function getDefaultCategoryImage(
 export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
   measurements,
   heightCm,
+  userFrontImage,
+  userBackImage,
+  userSideImage,
+  frontLandmarks,
+  backLandmarks,
+  sideLandmarks,
+  studioFrames,
+  activeGarmentName,
+  activeGarmentId,
+  garmentFrontImage,
+  garmentBackImage,
+  selectedSize,
+  onPhotoUpload,
   existingWardrobe,
   onAddWardrobeItem,
   onTryOnExistingItem,
@@ -103,10 +191,22 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
   const [flippedCardIds, setFlippedCardIds] = useState<Record<string, boolean>>({});
   const [savedToWardrobeIds, setSavedToWardrobeIds] = useState<Record<string, boolean>>({});
 
-  // Add Existing Clothing Modal/Drawer State & 3D Walk-In Closet Room Toggle
+  // Live Product Link Fetcher (API / Schema.org / Gemini Live Web Agent)
+  const [liveFetchedResult, setLiveFetchedResult] = useState<LiveProductFetchResult | null>(null);
+  const [isFetchingLiveUrl, setIsFetchingLiveUrl] = useState<boolean>(false);
+  const [liveFetchError, setLiveFetchError] = useState<string | null>(null);
+
+  // Recommendation Engine State (Spotify Taste DNA + Contextual Bandit + Amazon Lanes)
+  const [occasionContext, setOccasionContext] = useState<OccasionContext>('all');
+  const [discoveryMode, setDiscoveryMode] = useState<DiscoveryMode>('balanced');
+  const [activeLane, setActiveLane] = useState<RecommendationLane>('all_for_you');
+  const [feedbackEvents, setFeedbackEvents] = useState<RecommendationFeedbackEvent[]>([]);
+
+  // Add Existing Clothing Modal/Drawer State, 3D Walk-In Closet Room & Vertical Screen Lock on Mannequin
   const [showAddWardrobeForm, setShowAddWardrobeForm] = useState<boolean>(false);
   const [show3DClosetRoom, setShow3DClosetRoom] = useState<boolean>(true);
-  const [closetPassIndex, setClosetPassIndex] = useState<number>(2);
+  const [isScreenVerticallyLocked, setIsScreenVerticallyLocked] = useState<boolean>(true);
+  const feedSectionRef = useRef<HTMLElement>(null);
   const [newWardrobeName, setNewWardrobeName] = useState<string>('');
   const [newWardrobeBrand, setNewWardrobeBrand] = useState<string>('');
   const [newWardrobeCategory, setNewWardrobeCategory] =
@@ -116,16 +216,74 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
   const [newWardrobeSize, setNewWardrobeSize] = useState<string>('M');
   const [newWardrobeImage, setNewWardrobeImage] = useState<string>('');
 
+  // Lock the viewport vertically onto the 360° Mannequin Stage when Vertical Screen Lock is active
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (isScreenVerticallyLocked && show3DClosetRoom) {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+      document.body.style.overflowY = 'hidden';
+      document.body.setAttribute('data-screen-vertical-lock', 'locked');
+    } else {
+      document.body.style.overflowY = '';
+      document.body.setAttribute('data-screen-vertical-lock', 'unlocked');
+    }
+    return () => {
+      document.body.style.overflowY = '';
+      document.body.removeAttribute('data-screen-vertical-lock');
+    };
+  }, [isScreenVerticallyLocked, show3DClosetRoom]);
+
+  const handleScrollToFeedBelow = () => {
+    setIsScreenVerticallyLocked(false);
+    setTimeout(() => {
+      feedSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 30);
+  };
+
+  const handleFocusAndLockMannequin = () => {
+    setShow3DClosetRoom(true);
+    setIsScreenVerticallyLocked(true);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const recordProductFeedback = (product: ShoppingProduct, action: FeedbackActionType) => {
+    setFeedbackEvents((prev) => {
+      // If toggling 'like' on an already-liked product, remove the like
+      if (action === 'like') {
+        const existingLikeIdx = prev.findIndex(
+          (e) => e.itemId === product.id && (e.action === 'like' || e.action === 'super_like')
+        );
+        if (existingLikeIdx !== -1) {
+          return prev.filter((_, idx) => idx !== existingLikeIdx);
+        }
+      }
+      return [
+        ...prev,
+        {
+          itemId: product.id,
+          action,
+          timestampMs: Date.now(),
+          vector: encodeShopProductVector(product),
+          brand: product.brand,
+          category: classifyProductCategory(product),
+        },
+      ];
+    });
+  };
+
   useEffect(() => {
     loadCatalog('All', '');
   }, []);
 
-  const loadCatalog = async (brand: string, query: string) => {
+  const loadCatalog = async (brand: string, query: string, forceRefresh = false) => {
     setIsLoadingCatalog(true);
     try {
       const params = new URLSearchParams();
       if (brand && brand !== 'All') params.set('brand', brand);
-      if (query) params.set('q', query);
+      if (query && !isDirectProductUrl(query)) params.set('q', query);
+      if (forceRefresh) params.set('forceRefresh', '1');
       const res = await fetch(`/api/shop/catalog?${params.toString()}`);
       const data = await res.json();
       if (Array.isArray(data.products)) {
@@ -143,6 +301,45 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
     }
   };
 
+  const handleLiveFetchUrl = async (rawUrl: string) => {
+    const cleanUrl = rawUrl.trim();
+    if (!cleanUrl) return;
+    setSearchQuery(cleanUrl);
+    setIsFetchingLiveUrl(true);
+    setLiveFetchError(null);
+    try {
+      const res = await fetch('/api/shop/live-fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: cleanUrl,
+          measurements,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.product) {
+        setLiveFetchError(data?.error || 'Could not extract product from URL.');
+        return;
+      }
+      setLiveFetchedResult(data as LiveProductFetchResult);
+      if (typeof data.latencyMs === 'number') {
+        setLatencyMs(data.latencyMs);
+        setCacheHit(false);
+      }
+      setProducts((prev) => {
+        const filtered = prev.filter(
+          (p) => p.id !== data.product.id && p.productUrl !== data.product.productUrl
+        );
+        return [data.product, ...filtered];
+      });
+    } catch (err) {
+      console.warn('Live product URL fetch error:', err);
+      setLiveFetchError('Network error while live-fetching product URL.');
+    } finally {
+      setIsFetchingLiveUrl(false);
+    }
+  };
+
   const handleAISearch = async (customQuery?: string) => {
     const q = (customQuery !== undefined ? customQuery : searchQuery).trim();
     if (!q) {
@@ -151,6 +348,12 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
     }
     if (customQuery !== undefined) {
       setSearchQuery(customQuery);
+    }
+
+    // If user pasted or clicked a direct product URL, route to the Live Product Fetcher (API / Schema.org / Gemini Agent)
+    if (isDirectProductUrl(q)) {
+      await handleLiveFetchUrl(q);
+      return;
     }
 
     setIsSearchingAI(true);
@@ -252,19 +455,39 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
     };
     onAddWardrobeItem(item);
     setSavedToWardrobeIds((prev) => ({ ...prev, [product.id]: true }));
+    recordProductFeedback(product, 'save_closet');
   };
 
-  const stylePairings = buildStyleAndShopPairings(
-    existingWardrobe,
-    products,
-    measurements,
-    searchQuery
+  const { ranked: rankedCatalogRecommendations, tasteProfile } = useMemo(
+    () =>
+      rankShopCatalogForUser(products, measurements, existingWardrobe, feedbackEvents, {
+        searchQuery,
+        occasion: occasionContext,
+        discoveryMode,
+        lane: activeLane,
+      }),
+    [products, measurements, existingWardrobe, feedbackEvents, searchQuery, occasionContext, discoveryMode, activeLane]
+  );
+
+  const stylePairings = useMemo(
+    () =>
+      buildStyleAndShopPairings(existingWardrobe, products, measurements, searchQuery, {
+        occasion: occasionContext,
+        discoveryMode,
+        feedbackEvents,
+      }),
+    [existingWardrobe, products, measurements, searchQuery, occasionContext, discoveryMode, feedbackEvents]
   );
 
   const handleSlotCardTryOn = (
     pairing: StylePairingRecommendation,
     piece: OutfitSlotPiece
   ) => {
+    if (piece.shopProduct) {
+      recordProductFeedback(piece.shopProduct, 'try_on');
+    } else {
+      recordProductFeedback(pairing.shopComplement, 'try_on');
+    }
     if (onTryOnCompleteOutfit) {
       onTryOnCompleteOutfit(pairing, piece);
       return;
@@ -294,15 +517,15 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
       >
         <div className="w-full">
           <div className="flex items-center justify-between gap-1 mb-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 group-hover:text-indigo-700">
-              {piece.slotLabel}
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 group-hover:text-indigo-700 truncate whitespace-nowrap">
+              {piece.slot === 'layering' ? 'Layering' : piece.slotLabel}
             </span>
             <span
-              className={`text-[10px] font-semibold ${
+              className={`text-[10px] font-semibold whitespace-nowrap shrink-0 ${
                 isCloset ? 'text-slate-600' : 'text-emerald-700'
               }`}
             >
-              {piece.source}
+              {compact ? (isCloset ? 'Closet' : 'Shop') : piece.source}
             </span>
           </div>
 
@@ -349,8 +572,45 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* 0. VERTICALLY LOCKED 360° MANNEQUIN STAGE (PRIMARY TOP FOCUS) */}
+      {show3DClosetRoom && (
+        <section
+          aria-label="360° Mannequin Fitting Stage"
+          className="space-y-2"
+        >
+          <ThreeGarmentWorldScene
+            measurements={measurements}
+            heightCm={heightCm}
+            userFrontImage={userFrontImage}
+            userBackImage={userBackImage}
+            userSideImage={userSideImage}
+            frontLandmarks={frontLandmarks}
+            backLandmarks={backLandmarks}
+            sideLandmarks={sideLandmarks}
+            studioFrames={studioFrames}
+            activeGarmentName={activeGarmentName}
+            activeGarmentId={activeGarmentId}
+            garmentFrontImage={garmentFrontImage}
+            garmentBackImage={garmentBackImage}
+            onPhotoUpload={onPhotoUpload}
+            onOpenPhotoSetup={onOpenSettings}
+            trueSize={selectedSize || stylePairings[0]?.shopTrueSize || 'M'}
+            activeOutfit={stylePairings[0]}
+            existingWardrobe={existingWardrobe}
+            shopCatalog={products}
+            onTryOnClosetItem={onTryOnExistingItem}
+            onTryOnShopProduct={onTryOnShopProduct}
+            initialSection="mannequin"
+            verticalScreenLocked={isScreenVerticallyLocked}
+            onToggleVerticalScreenLock={setIsScreenVerticallyLocked}
+            onScrollToFeedBelow={handleScrollToFeedBelow}
+          />
+        </section>
+      )}
+
       {/* 1. HERO AI STYLE & SHOPPING SEARCH CONCIERGE */}
       <section
+        ref={feedSectionRef}
         aria-label="AI Clothing & Style Search"
         className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4"
       >
@@ -365,7 +625,7 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                 {heightCm} cm · Chest {measurements.chest} cm · Waist {measurements.waist} cm · Hip {measurements.hip} cm (±{measurements.uncertaintyCm} cm)
               </span>
               <span aria-hidden="true">·</span>
-              <span>0ms Fit Evaluation</span>
+              <span>Instant Fit Calibration</span>
             </div>
             <h2 className="text-xl font-bold text-slate-900 mt-1 tracking-tight">
               Personal Style &amp; Live Shop Recommendations
@@ -375,17 +635,36 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="px-3.5 py-2 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-semibold flex items-center gap-1.5 self-start lg:self-center shrink-0 transition-colors cursor-pointer"
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Edit Photos &amp; Fit Settings</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start lg:self-center shrink-0">
+            <button
+              type="button"
+              onClick={handleFocusAndLockMannequin}
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                isScreenVerticallyLocked && show3DClosetRoom
+                  ? 'bg-slate-900 text-amber-300 border border-slate-800'
+                  : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+              }`}
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>
+                {isScreenVerticallyLocked && show3DClosetRoom
+                  ? 'Screen Locked on Mannequin'
+                  : 'Lock Screen on 360° Mannequin ↑'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="px-3.5 py-2 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Edit Photos &amp; Fit Settings</span>
+            </button>
+          </div>
         </div>
 
-        {/* AI Query Input Bar */}
+        {/* AI Query Input Bar & Live Product Link Fetcher (API + Agent) */}
         <div className="space-y-3 bg-slate-50 rounded-xl p-4 border border-slate-200/80">
           <div className="flex flex-col sm:flex-row gap-2.5">
             <div className="relative flex-1">
@@ -400,21 +679,31 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                     handleAISearch();
                   }
                 }}
-                placeholder="Ask AI to find clothing or build a 5-piece outfit (e.g. 'unstructured blazer outfit', 'layering tee and overshirt')..."
-                aria-label="Ask AI to search clothing and style recommendations"
+                placeholder="Ask AI to build an outfit OR paste any product link (https://...) to live-fetch via Storefront API & Gemini Agent..."
+                aria-label="Ask AI to search clothing or paste a product URL to live-fetch"
                 className="w-full pl-9 pr-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
               />
             </div>
             <button
               type="button"
               onClick={() => handleAISearch()}
-              disabled={isSearchingAI}
+              disabled={isSearchingAI || isFetchingLiveUrl}
               className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0"
             >
-              {isSearchingAI ? (
+              {isFetchingLiveUrl ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Live Fetching Link...</span>
+                </>
+              ) : isSearchingAI ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   <span>Searching Style &amp; Stock...</span>
+                </>
+              ) : isDirectProductUrl(searchQuery) ? (
+                <>
+                  <Link2 className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>Live Fetch Product Link</span>
                 </>
               ) : (
                 <>
@@ -425,19 +714,212 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
             </button>
           </div>
 
-          {/* Prompt Suggestions */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-medium text-slate-500 mr-1">Ask AI:</span>
-            {AI_QUERY_SUGGESTIONS.map((prompt) => (
+          {/* Prompt Suggestions & 1-Click Live Fetch Product Links */}
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-medium text-slate-500 mr-1">Ask AI:</span>
+              {AI_QUERY_SUGGESTIONS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => handleAISearch(prompt)}
+                  className="text-xs font-medium px-2.5 py-1 rounded-lg bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 transition-colors cursor-pointer"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              <span className="text-xs font-medium text-slate-500 flex items-center gap-1 mr-0.5">
+                <Link2 className="w-3 h-3 text-indigo-600" />
+                <span>Live Fetch URL:</span>
+              </span>
+              {QUICK_LIVE_FETCH_LINKS.map((item) => (
+                <button
+                  key={item.url}
+                  type="button"
+                  onClick={() => handleLiveFetchUrl(item.url)}
+                  disabled={isFetchingLiveUrl}
+                  title={`Live fetch ${item.url} via Storefront JSON API / Gemini Web Agent`}
+                  className="text-xs font-medium px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200 transition-colors cursor-pointer"
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Live Fetch Error Notice */}
+          {liveFetchError && (
+            <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 flex items-center justify-between">
+              <span>{liveFetchError}</span>
               <button
-                key={prompt}
                 type="button"
-                onClick={() => handleAISearch(prompt)}
-                className="text-xs font-medium px-2.5 py-1 rounded-lg bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 transition-colors cursor-pointer"
+                onClick={() => setLiveFetchError(null)}
+                className="text-rose-600 hover:text-rose-900 font-semibold cursor-pointer"
               >
-                {prompt}
+                Dismiss
               </button>
-            ))}
+            </div>
+          )}
+
+          {/* Live Fetched Product Banner (Storefront API / Schema.org / Gemini Live Web Agent) */}
+          {liveFetchedResult && (
+            <div className="rounded-xl bg-white border border-emerald-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <img
+                  src={liveFetchedResult.product.frontImage}
+                  alt={liveFetchedResult.product.title}
+                  referrerPolicy="no-referrer"
+                  className="w-12 h-16 rounded-lg object-cover bg-slate-100 border border-slate-200 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+                    <span className="font-semibold text-emerald-700">
+                      Live Fetched ({liveFetchedResult.sourceLabel})
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-semibold text-slate-800">
+                      {liveFetchedResult.product.brand}
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">
+                      ${liveFetchedResult.product.price}
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums text-indigo-700 font-semibold">
+                      True Size {liveFetchedResult.fitEvaluation.trueSize} (
+                      {liveFetchedResult.fitEvaluation.matchScore}% Match)
+                    </span>
+                  </div>
+                  <div className="text-xs font-bold text-slate-900 truncate mt-0.5">
+                    {liveFetchedResult.product.title}
+                  </div>
+                  <div className="text-[11px] text-slate-500 truncate">
+                    Added to your Live Catalog &amp; 5-Piece Outfit Engine · {liveFetchedResult.latencyMs} ms
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    recordProductFeedback(liveFetchedResult.product, 'try_on');
+                    onTryOnShopProduct(liveFetchedResult.product);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Shirt className="w-3.5 h-3.5" />
+                  <span>Fit in 360° ({liveFetchedResult.fitEvaluation.trueSize})</span>
+                </button>
+                <a
+                  href={liveFetchedResult.sizeSpecificUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`Open official ${liveFetchedResult.product.brand} product link pre-selected to Size ${liveFetchedResult.fitEvaluation.trueSize}`}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-semibold flex items-center gap-1"
+                >
+                  <span>Buy Size {liveFetchedResult.fitEvaluation.trueSize}</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLiveFetchedResult(null)}
+                  aria-label="Close live fetched product banner"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* SPOTIFY + AMAZON STYLE TASTE DNA & CONTEXTUAL BANDIT TUNER */}
+        <div className="rounded-xl bg-slate-50/80 border border-slate-200/80 p-3.5 space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+              <Compass className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span className="font-bold text-slate-900">Your Style DNA Vector:</span>
+              {tasteProfile.dominantTraits.map((trait, i) => (
+                <React.Fragment key={trait.axis}>
+                  {i > 0 && <span aria-hidden="true" className="text-slate-300">·</span>}
+                  <span>
+                    <span className="font-medium text-slate-800">{trait.label}</span>{' '}
+                    <span className="font-mono tabular-nums text-emerald-700 font-semibold">
+                      {trait.scorePct}%
+                    </span>
+                  </span>
+                </React.Fragment>
+              ))}
+            </div>
+
+            {feedbackEvents.length > 0 && (
+              <div className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
+                <span className="font-mono tabular-nums text-indigo-700 font-semibold">
+                  {feedbackEvents.length} Taste Signal{feedbackEvents.length === 1 ? '' : 's'} Active
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFeedbackEvents([])}
+                  className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1 underline underline-offset-2 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset Signals</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5 pt-2 border-t border-slate-200/70">
+            {/* Occasion Context Bandit Selector */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-slate-500 mr-1">
+                Occasion Context:
+              </span>
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-white rounded-lg border border-slate-200/80">
+                {OCCASION_OPTIONS.map((occ) => (
+                  <button
+                    key={occ.id}
+                    type="button"
+                    onClick={() => setOccasionContext(occ.id)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                      occasionContext === occ.id
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {occ.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Exploration vs Exploitation Discovery Mode */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-slate-500 mr-1">
+                Discovery Mode:
+              </span>
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-white rounded-lg border border-slate-200/80">
+                {DISCOVERY_MODE_OPTIONS.map((dm) => (
+                  <button
+                    key={dm.id}
+                    type="button"
+                    onClick={() => setDiscoveryMode(dm.id)}
+                    title={dm.hint}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                      discoveryMode === dm.id
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {dm.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -474,7 +956,7 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
               <div className="pt-3 border-t border-indigo-200/60">
                 <p className="text-xs font-bold text-slate-900 mb-2 flex items-center gap-1.5">
                   <Globe className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>Verified Web Retailers (Live HTTP 200 Stock Check)</span>
+                  <span>Verified Web Retailers (In-Stock Match)</span>
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   {webDiscoveries.map((item, idx) => (
@@ -488,7 +970,7 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                             {item.brand}
                           </span>
                           <span className="text-emerald-700 font-mono tabular-nums shrink-0">
-                            Live 200 OK
+                            In Stock
                           </span>
                         </div>
                         <p className="text-xs font-semibold text-slate-900 line-clamp-1 mt-0.5">
@@ -550,45 +1032,23 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
           <div className="flex flex-wrap items-center gap-2 self-start sm:self-center shrink-0">
             <button
               type="button"
-              onClick={() => setShow3DClosetRoom((prev) => !prev)}
-              className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
-                show3DClosetRoom
-                  ? 'bg-slate-900 text-white shadow-2xs'
-                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200'
-              }`}
+              onClick={handleFocusAndLockMannequin}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              <Box className="w-3.5 h-3.5 text-amber-400" />
-              <span>{show3DClosetRoom ? 'Hide 3D Walk-In Closet Room' : 'Open 3D Walk-In Closet Room'}</span>
+              <ArrowUp className="w-3.5 h-3.5 text-amber-400" />
+              <span>Focus 360° Mannequin Stage</span>
             </button>
 
             <button
               type="button"
               onClick={() => setShowAddWardrobeForm(!showAddWardrobeForm)}
-              className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <Plus className="w-3.5 h-3.5 text-indigo-600" />
               <span>{showAddWardrobeForm ? 'Cancel' : 'Add Existing Clothing Piece'}</span>
             </button>
           </div>
         </div>
-
-        {/* Interactive 3D Walk-In Closet Room with Dedicated Architectural Sections */}
-        {show3DClosetRoom && (
-          <div className="space-y-2">
-            <ThreeGarmentWorldScene
-              measurements={measurements}
-              heightCm={heightCm}
-              trueSize={stylePairings[0]?.shopTrueSize || 'M'}
-              activePassIndex={closetPassIndex}
-              onSelectPassIndex={setClosetPassIndex}
-              activeOutfit={stylePairings[0]}
-              existingWardrobe={existingWardrobe}
-              shopCatalog={products}
-              onTryOnClosetItem={onTryOnExistingItem}
-              onTryOnShopProduct={onTryOnShopProduct}
-            />
-          </div>
-        )}
 
         {/* Inline Add Existing Wardrobe Piece Form */}
         {showAddWardrobeForm && (
@@ -739,78 +1199,139 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
         {/* Curated 5-Piece Outfit Recommendations Grid */}
         {stylePairings.length > 0 && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 pt-1">
-            {stylePairings.map((pairing, idx) => (
-              <div
-                key={pairing.id}
-                className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between gap-3.5 bg-slate-50/40"
-              >
-                <div className="space-y-3">
-                  {/* Outfit Header */}
-                  <div className="flex items-center justify-between gap-2 text-xs text-slate-500 border-b border-slate-200/70 pb-2.5">
-                    <div>
-                      <span className="font-bold text-slate-900">
-                        0{idx + 1}. {pairing.occasion}
-                      </span>
-                      <div className="text-[11px] text-slate-500">
-                        5-Piece Look · Top + Tee + Bottom + Watch + Shoes
+            {stylePairings.map((pairing, idx) => {
+              const isOutfitLiked = tasteProfile.likedItemIds.has(pairing.shopComplement.id);
+              return (
+                <div
+                  key={pairing.id}
+                  className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between gap-3.5 bg-slate-50/40"
+                >
+                  <div className="space-y-3">
+                    {/* Outfit Header */}
+                    <div className="flex items-start justify-between gap-2 text-xs text-slate-500 border-b border-slate-200/70 pb-2.5">
+                      <div>
+                        <span className="font-bold text-slate-900">
+                          0{idx + 1}. {pairing.occasion}
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 mt-0.5">
+                          <span className="font-mono tabular-nums font-semibold text-indigo-700">
+                            {pairing.matchScore ?? 95}% Match
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-emerald-700 font-mono tabular-nums font-semibold">
+                            True Size {pairing.shopTrueSize}
+                          </span>
+                          {pairing.harmonyBreakdown && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span>
+                                Palette {pairing.harmonyBreakdown.colorCoherenceScore}%
+                              </span>
+                            </>
+                          )}
+                        </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => recordProductFeedback(pairing.shopComplement, 'like')}
+                        aria-label={`Like outfit ${pairing.occasion}`}
+                        title={
+                          isOutfitLiked
+                            ? 'Liked — boosting similar outfits in your Taste DNA'
+                            : 'Like this outfit to boost similar silhouettes & textures'
+                        }
+                        className={`p-1.5 rounded-lg border transition-colors cursor-pointer shrink-0 ${
+                          isOutfitLiked
+                            ? 'bg-rose-50 border-rose-200 text-rose-600'
+                            : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900'
+                        }`}
+                      >
+                        <Heart
+                          className={`w-3.5 h-3.5 ${isOutfitLiked ? 'fill-rose-500 text-rose-500' : ''}`}
+                        />
+                      </button>
                     </div>
-                    <span className="text-emerald-700 font-mono tabular-nums font-semibold shrink-0">
-                      True Size {pairing.shopTrueSize}
-                    </span>
+
+                    {/* Upper Body Row: 1. Top / Outer + 2. Layering (T-Shirt) */}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {renderSlotCard(pairing, pairing.slots.top, false)}
+                      {renderSlotCard(pairing, pairing.slots.layering, false)}
+                    </div>
+
+                    {/* Lower Body & Accessories Row: 3. Bottom + 4. Watch + 5. Shoes */}
+                    <div className="grid grid-cols-3 gap-2">
+                      {renderSlotCard(pairing, pairing.slots.bottom, true)}
+                      {renderSlotCard(pairing, pairing.slots.watch, true)}
+                      {renderSlotCard(pairing, pairing.slots.shoes, true)}
+                    </div>
+
+                    {/* Explainable Multi-Slot Harmony Telemetry */}
+                    {pairing.harmonyBreakdown && (
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500 font-mono tabular-nums pt-0.5">
+                        {pairing.harmonyBreakdown.explanationPills.map((pill, pIdx) => (
+                          <React.Fragment key={pill}>
+                            {pIdx > 0 && <span aria-hidden="true">·</span>}
+                            <span>{pill}</span>
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    )}
+
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      {pairing.whyItWorks}
+                    </p>
                   </div>
 
-                  {/* Upper Body Row: 1. Top / Outer + 2. Layering (T-Shirt) */}
-                  <div className="grid grid-cols-2 gap-2.5">
-                    {renderSlotCard(pairing, pairing.slots.top, false)}
-                    {renderSlotCard(pairing, pairing.slots.layering, false)}
+                  <div className="flex items-center gap-2 pt-2.5 border-t border-slate-200/70">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        recordProductFeedback(pairing.shopComplement, 'try_on');
+                        if (onTryOnCompleteOutfit) {
+                          onTryOnCompleteOutfit(pairing);
+                        } else {
+                          onTryOnShopProduct(pairing.shopComplement);
+                        }
+                      }}
+                      className="flex-1 py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Shirt className="w-3.5 h-3.5" />
+                      <span>Try 5-Piece Outfit in 360° ({pairing.shopTrueSize})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onTryOnCompleteOutfit
+                          ? onTryOnCompleteOutfit(
+                              pairing,
+                              pairing.slots.top.source === 'Your Closet'
+                                ? pairing.slots.top
+                                : pairing.slots.layering
+                            )
+                          : onTryOnExistingItem(pairing.existingItem)
+                      }
+                      className="py-2 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                      title="Inspect your closet piece within this 5-piece outfit in 360°"
+                    >
+                      Closet 360°
+                    </button>
+                    <a
+                      href={buildSizeSpecificProductUrl(
+                        pairing.shopComplement,
+                        pairing.shopTrueSize
+                      )}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open ${pairing.shopComplement.brand} ${pairing.shopComplement.title} store page (Size ${pairing.shopTrueSize})`}
+                      aria-label={`Open ${pairing.shopComplement.title} store page`}
+                      className="p-2 rounded-lg border border-slate-200 hover:border-slate-300 bg-white text-slate-600 hover:text-slate-900 transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
                   </div>
-
-                  {/* Lower Body & Accessories Row: 3. Bottom + 4. Watch + 5. Shoes */}
-                  <div className="grid grid-cols-3 gap-2">
-                    {renderSlotCard(pairing, pairing.slots.bottom, true)}
-                    {renderSlotCard(pairing, pairing.slots.watch, true)}
-                    {renderSlotCard(pairing, pairing.slots.shoes, true)}
-                  </div>
-
-                  <p className="text-xs text-slate-600 leading-relaxed">
-                    {pairing.whyItWorks}
-                  </p>
                 </div>
-
-                <div className="flex items-center gap-2 pt-2.5 border-t border-slate-200/70">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onTryOnCompleteOutfit
-                        ? onTryOnCompleteOutfit(pairing)
-                        : onTryOnShopProduct(pairing.shopComplement)
-                    }
-                    className="flex-1 py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                  >
-                    <Shirt className="w-3.5 h-3.5" />
-                    <span>Try 5-Piece Outfit in 360° ({pairing.shopTrueSize})</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onTryOnCompleteOutfit
-                        ? onTryOnCompleteOutfit(
-                            pairing,
-                            pairing.slots.top.source === 'Your Closet'
-                              ? pairing.slots.top
-                              : pairing.slots.layering
-                          )
-                        : onTryOnExistingItem(pairing.existingItem)
-                    }
-                    className="py-2 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
-                    title="Inspect your closet piece within this 5-piece outfit in 360°"
-                  >
-                    Closet 360°
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -822,12 +1343,12 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
           <div>
-            <div className="flex items-center gap-2 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span>02. Official Storefront Catalog</span>
               <span aria-hidden="true">·</span>
               <span className="text-emerald-700 font-semibold">Live Stock Verified</span>
               <span aria-hidden="true">·</span>
-              <span>Pre-Fitted to Your Saved Profile</span>
+              <span>Ranked by Fit, Closet Synergy &amp; Style DNA (MMR Diversified)</span>
             </div>
             <div className="flex items-center gap-2 mt-1">
               <ShoppingBag className="w-5 h-5 text-indigo-600" />
@@ -838,6 +1359,17 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
+            {tasteProfile.dismissedItemIds.size > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setFeedbackEvents((prev) => prev.filter((e) => e.action !== 'dismiss'))
+                }
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer"
+              >
+                Restore {tasteProfile.dismissedItemIds.size} hidden
+              </button>
+            )}
             {latencyMs !== null && (
               <span className="text-xs font-mono tabular-nums text-slate-500">
                 {latencyMs} ms · {cacheHit ? 'Edge Cache' : 'Live API'}
@@ -845,31 +1377,53 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
             )}
             <button
               type="button"
-              onClick={() => loadCatalog(selectedBrand, searchQuery)}
+              onClick={() => loadCatalog(selectedBrand, searchQuery, true)}
               className="text-xs text-slate-600 hover:text-slate-900 flex items-center gap-1.5 font-medium cursor-pointer"
+              title="Force live storefront refresh from official brand APIs"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isLoadingCatalog ? 'animate-spin' : ''}`} />
-              <span>Refresh ({products.length} available)</span>
+              <span>Live Refresh ({rankedCatalogRecommendations.length} ranked)</span>
             </button>
           </div>
         </div>
 
-        {/* Brand Filter Segmented Controls */}
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200/70 w-fit">
-          {BRAND_FILTERS.map((brand) => (
-            <button
-              key={brand}
-              type="button"
-              onClick={() => handleBrandClick(brand)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                selectedBrand === brand
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              {brand}
-            </button>
-          ))}
+        {/* Amazon & Spotify Recommendation Lanes + Brand Filter Controls */}
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+          {/* Recommendation Algorithm Lanes */}
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200/70 w-fit">
+            {RECOMMENDATION_LANES.map((lane) => (
+              <button
+                key={lane.id}
+                type="button"
+                onClick={() => setActiveLane(lane.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  activeLane === lane.id
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {lane.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Brand Filter Segmented Controls */}
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200/70 w-fit">
+            {BRAND_FILTERS.map((brand) => (
+              <button
+                key={brand}
+                type="button"
+                onClick={() => handleBrandClick(brand)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  selectedBrand === brand
+                    ? 'bg-white text-slate-900 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {brand}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Product Grid */}
@@ -889,12 +1443,12 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {products.slice(0, 8).map((product) => {
+            {rankedCatalogRecommendations.slice(0, 8).map((rec) => {
+              const { product } = rec;
               const fitEval = evaluateProductFitForUser(product, measurements);
               const trueSizeRow = fitEval.fitAnalysis.sizeResults.find(
                 (s) => s.size === fitEval.trueSize
               );
-              const wardrobeMatch = findBestWardrobeMatchForProduct(product, existingWardrobe);
               const isSelected = activeGarmentUrl === product.productUrl;
               const showBack = Boolean(flippedCardIds[product.id]);
               const displayImage = showBack ? product.backImage : product.frontImage;
@@ -912,7 +1466,10 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                   <div>
                     {/* Product Image */}
                     <div
-                      onClick={() => onTryOnShopProduct(product)}
+                      onClick={() => {
+                        recordProductFeedback(product, 'try_on');
+                        onTryOnShopProduct(product);
+                      }}
                       className="relative aspect-3/4 bg-slate-100 overflow-hidden group cursor-pointer"
                       title={`Try ${product.title} on in 360° Studio`}
                     >
@@ -925,8 +1482,8 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                       />
 
                       <div className="absolute top-2.5 inset-x-2.5 flex items-center justify-between pointer-events-none">
-                        <span className="bg-slate-900/85 backdrop-blur-xs text-white text-[11px] font-medium px-2 py-0.5 rounded">
-                          In Stock
+                        <span className="bg-slate-900/90 backdrop-blur-xs text-white text-[11px] font-semibold font-mono tabular-nums px-2 py-0.5 rounded">
+                          {rec.totalMatchScore}% Match
                         </span>
                         <span className="bg-white/95 backdrop-blur-xs text-slate-900 text-xs font-bold px-2 py-0.5 rounded font-mono tabular-nums">
                           ${product.price}
@@ -938,6 +1495,7 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
+                            recordProductFeedback(product, 'flip_back');
                             setFlippedCardIds((prev) => ({
                               ...prev,
                               [product.id]: !prev[product.id],
@@ -965,6 +1523,17 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                         </h4>
                       </div>
 
+                      {/* Multi-Factor Score Breakdown (Fit + Style DNA + Closet Multiplier) */}
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] font-mono tabular-nums text-slate-600">
+                        <span className="text-emerald-700 font-semibold">
+                          Fit {rec.fitAffinityScore}%
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span>DNA {rec.styleDnaScore}%</span>
+                        <span aria-hidden="true">·</span>
+                        <span>Unlocks {rec.unlockedOutfitsCount} Looks</span>
+                      </div>
+
                       {/* Pre-Calculated True Size & Ease */}
                       {fitEval.trueSize && (
                         <div className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px]">
@@ -986,12 +1555,10 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                         </div>
                       )}
 
-                      {/* Existing Wardrobe Pairing Note */}
-                      {wardrobeMatch && (
-                        <div className="text-[11px] text-slate-500 truncate">
-                          Pairs with your <span className="font-medium text-slate-800">{wardrobeMatch.name.split('(')[0].trim()}</span>
-                        </div>
-                      )}
+                      {/* Amazon Item-to-Item Collaborative Closet Pairing Note */}
+                      <div className="text-[11px] text-slate-500 truncate" title={rec.collaborativeTag}>
+                        {rec.collaborativeTag}
+                      </div>
 
                       {/* Available Sizes */}
                       <div className="flex items-center gap-1 flex-wrap text-[11px] font-mono tabular-nums">
@@ -1018,11 +1585,14 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                     </div>
                   </div>
 
-                  {/* Card Actions */}
+                  {/* Card Actions (Try On + Like + Save + Dismiss + Retailer Link) */}
                   <div className="px-3.5 pb-3.5 pt-1 flex items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => onTryOnShopProduct(product)}
+                      onClick={() => {
+                        recordProductFeedback(product, 'try_on');
+                        onTryOnShopProduct(product);
+                      }}
                       className="flex-1 py-2 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <Shirt className="w-3.5 h-3.5" />
@@ -1030,10 +1600,30 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                     </button>
                     <button
                       type="button"
+                      onClick={() => recordProductFeedback(product, 'like')}
+                      aria-label={`Like ${product.title}`}
+                      title={
+                        rec.isLiked
+                          ? 'Liked — boosting similar garments in your Style DNA'
+                          : 'Like to boost similar cuts & textures'
+                      }
+                      className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+                        rec.isLiked
+                          ? 'bg-rose-50 border-rose-200 text-rose-600'
+                          : 'border-slate-200 hover:bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      <Heart
+                        className={`w-3.5 h-3.5 ${rec.isLiked ? 'fill-rose-500 text-rose-500' : ''}`}
+                      />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() =>
                         handleSaveShopProductToWardrobe(product, fitEval.trueSize || 'M')
                       }
                       disabled={isSavedInCloset}
+                      aria-label={`Save ${product.title} to closet`}
                       title="Save piece to your existing wardrobe"
                       className="p-2 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 disabled:text-emerald-700 transition-colors cursor-pointer"
                     >
@@ -1043,11 +1633,20 @@ export const HomeStyleAndShopFeed: React.FC<HomeStyleAndShopFeedProps> = ({
                         <Plus className="w-3.5 h-3.5" />
                       )}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => recordProductFeedback(product, 'dismiss')}
+                      aria-label={`Dismiss ${product.title}`}
+                      title="Not my style — hide & tune recommendations"
+                      className="p-2 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                     <a
-                      href={product.productUrl}
+                      href={buildSizeSpecificProductUrl(product, fitEval.trueSize)}
                       target="_blank"
                       rel="noopener noreferrer"
-                      title={`Open ${product.title} store page`}
+                      title={`Open official ${product.brand} store page pre-selected to True Size ${fitEval.trueSize || 'M'}`}
                       aria-label={`Open ${product.title} store page`}
                       className="p-2 rounded-lg border border-slate-200 hover:border-slate-300 text-slate-600 hover:text-slate-900 transition-colors"
                     >

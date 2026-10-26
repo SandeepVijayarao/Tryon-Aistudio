@@ -9,52 +9,79 @@ import {
   Eye,
   Sparkles,
   Camera,
-  Shirt,
   Layers,
-  Watch,
-  Footprints,
   Compass,
   UserCheck,
   Play,
   Pause,
+  Upload,
+  Scan,
+  RotateCw,
+  Lock,
+  Unlock,
+  ArrowDown,
 } from 'lucide-react';
-import { BodyMeasurements, ShoppingProduct } from '../types/tryon.ts';
+import {
+  BodyMeasurements,
+  PhotoLandmarks,
+  SideLandmarks,
+  ShoppingProduct,
+  SpinFrame,
+} from '../types/tryon.ts';
 import {
   ExistingWardrobeItem,
   OutfitSlotPiece,
   StylePairingRecommendation,
 } from '../utils/wardrobeStyler.ts';
-import { RenderCritiqueIteration } from '../utils/multiAgentOrchestrator.ts';
 import {
   WARDROBE_LINE_ITEMS,
   HumanWalkerState,
   createInitialHumanWalkerState,
   stepHumanWalkerState,
-  computeHumanJointPose,
   commandHumanSelectLineItem,
 } from '../utils/closetHumanKinematics.ts';
+import {
+  Reconstructed3DBodySpec,
+  STUDIO_TURNTABLE_ANGLES,
+  Studio3DAngleSpec,
+  build3DBodySpecFromUserPhotos,
+  computeActiveStudioAngleFromCamera,
+  computeMannequinVerticalLockCameraSpec,
+  keyOutStudioBackdropFromRgba,
+  resolveStudioTurntableFramesFor3D,
+} from '../utils/photoTo3DBuilder.ts';
+import { DEMO_PRESETS } from '../utils/demoPresets.ts';
 
 export type ClosetSectionId =
   | 'overview'
-  | 'human'
   | 'mannequin'
+  | 'human'
   | 'blazers'
   | 'knitwear'
   | 'trousers'
   | 'watches'
   | 'footwear';
 
+export type Photo3DDisplayMode = 'photo_twin_dressed' | 'raw_photo_scan';
+
 interface ThreeGarmentWorldSceneProps {
   measurements: BodyMeasurements;
   heightCm: number;
+  userFrontImage?: string;
+  userBackImage?: string;
+  userSideImage?: string;
+  frontLandmarks?: PhotoLandmarks;
+  backLandmarks?: PhotoLandmarks;
+  sideLandmarks?: SideLandmarks;
+  studioFrames?: SpinFrame[];
+  activeGarmentName?: string;
+  activeGarmentId?: string;
+  garmentFrontImage?: string;
+  garmentBackImage?: string;
+  onPhotoUpload?: (slot: 'front' | 'back' | 'side', dataUrl: string) => void;
+  onOpenPhotoSetup?: () => void;
   trueSize?: string;
   recommendedSize?: string;
-  activePassIndex?: number;
-  onSelectPassIndex?: (idx: number) => void;
-  iterations?: RenderCritiqueIteration[];
-  activePass?: RenderCritiqueIteration;
-  allPasses?: RenderCritiqueIteration[];
-  onSelectPass?: (passNum: number) => void;
   activeOutfit?: StylePairingRecommendation;
   existingWardrobe?: ExistingWardrobeItem[];
   shopCatalog?: ShoppingProduct[];
@@ -62,6 +89,9 @@ interface ThreeGarmentWorldSceneProps {
   onTryOnShopProduct?: (product: ShoppingProduct) => void;
   onTryOnOutfitSlot?: (piece: OutfitSlotPiece) => void;
   initialSection?: ClosetSectionId;
+  verticalScreenLocked?: boolean;
+  onToggleVerticalScreenLock?: (locked: boolean) => void;
+  onScrollToFeedBelow?: () => void;
 }
 
 interface FabricSwatch {
@@ -119,20 +149,28 @@ interface ClosetBayMeta {
 
 const CLOSET_BAYS: ClosetBayMeta[] = [
   {
+    id: 'mannequin',
+    label: '360° Mannequin Focus',
+    zoneTitle: 'Center Stage · 360° Studio Mannequin',
+    subtitle: 'Full-body photorealistic model from the 360° Fitting Studio centered and vertically locked on the degree pedestal',
+    camPos: [0.0, -0.01, 3.02],
+    lookAt: [0.0, -0.06, 0.0],
+  },
+  {
     id: 'overview',
     label: 'Room Overview',
-    zoneTitle: 'Architectural Walk-In Closet & 360° Atelier',
-    subtitle: 'Full 6-zone bespoke dressing room with 3D human walking & selecting clothing from the line',
-    camPos: [0.0, 2.15, 4.35],
-    lookAt: [-0.45, 0.35, -0.5],
+    zoneTitle: 'Architectural Walk-In Closet & 360° Fitting Studio',
+    subtitle: 'Full 6-zone bespoke dressing room featuring your live 8-angle 360° Fitting Studio photo on the central turntable',
+    camPos: [0.0, 0.72, 3.65],
+    lookAt: [0.0, 0.08, -0.15],
   },
   {
     id: 'human',
-    label: '3D Human & Line',
-    zoneTitle: '3D Shopper · Walking & Selecting Clothing from the Line',
-    subtitle: 'Articulated 3D human walking to the brass wardrobe rail, reaching for hangers & inspecting fit',
-    camPos: [0.25, 1.18, 2.78],
-    lookAt: [-1.75, 0.18, -0.35],
+    label: 'Wardrobe Line & Fit',
+    zoneTitle: 'Wardrobe Rail & 360° Studio Fit Presentation',
+    subtitle: 'Select any hanging garment on the brass wardrobe rail to pull it forward and preview on the 360° Fitting Studio photo',
+    camPos: [-0.45, 0.82, 2.68],
+    lookAt: [-0.75, 0.18, -0.25],
   },
   {
     id: 'blazers',
@@ -173,14 +211,6 @@ const CLOSET_BAYS: ClosetBayMeta[] = [
     subtitle: 'Angled LED-lit walnut shoe shelves with Espresso Suede Loafers, Calfskin Sneakers & Service Boots',
     camPos: [0.85, 0.75, 1.55],
     lookAt: [2.35, 0.45, -0.45],
-  },
-  {
-    id: 'mannequin',
-    label: '360° Mannequin',
-    zoneTitle: 'Center Stage · Calibrated 360° Mannequin & Render-Critique Loop',
-    subtitle: '10-part anthropometric rig with 32-node biometric sensor ring & tri-fold atelier mirror',
-    camPos: [0.0, 0.62, 2.35],
-    lookAt: [0.0, 0.28, 0.0],
   },
 ];
 
@@ -291,54 +321,334 @@ function createTurntableDialTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+/**
+ * Builds 8-angle full-body CanvasTextures from the 360° Fitting Studio photos
+ * (with edge-connected studio cyclorama removal so the person from the 360° Fitting Studio
+ * stands directly on the 3D Walk-In Closet turntable pedestal).
+ */
+function createStudio360TurntableTextures(
+  dressedSpecs: Studio3DAngleSpec[],
+  rawSpecs: Studio3DAngleSpec[],
+  drapeFrontUrl: string | undefined,
+  drapeBackUrl: string | undefined,
+  shouldDrapeOverlay: boolean,
+  maxAnisotropy: number,
+  onLoaded: () => void
+): {
+  dressedTextures: THREE.CanvasTexture[];
+  rawTextures: THREE.CanvasTexture[];
+  applyBlazerTintHex: (targetHex: number | null) => void;
+  dispose: () => void;
+} {
+  const TEX_W = 768;
+  const TEX_H = 1024;
+
+  const dressedCanvases: HTMLCanvasElement[] = [];
+  const dressedBaseImageData: (ImageData | null)[] = new Array(8).fill(null);
+  const dressedTextures: THREE.CanvasTexture[] = [];
+  const rawTextures: THREE.CanvasTexture[] = [];
+
+  for (let i = 0; i < 8; i++) {
+    const dCanvas = document.createElement('canvas');
+    dCanvas.width = TEX_W;
+    dCanvas.height = TEX_H;
+    dressedCanvases.push(dCanvas);
+
+    const dTex = new THREE.CanvasTexture(dCanvas);
+    dTex.colorSpace = THREE.SRGBColorSpace;
+    dTex.anisotropy = maxAnisotropy;
+    dressedTextures.push(dTex);
+
+    const rCanvas = document.createElement('canvas');
+    rCanvas.width = TEX_W;
+    rCanvas.height = TEX_H;
+    const rTex = new THREE.CanvasTexture(rCanvas);
+    rTex.colorSpace = THREE.SRGBColorSpace;
+    rTex.anisotropy = maxAnisotropy;
+    rawTextures.push(rTex);
+  }
+
+  let cancelled = false;
+  const imageCache = new Map<string, Promise<HTMLImageElement | null>>();
+
+  const loadImg = (url?: string): Promise<HTMLImageElement | null> => {
+    if (!url) return Promise.resolve(null);
+    if (imageCache.has(url)) return imageCache.get(url)!;
+    const p = new Promise<HTMLImageElement | null>((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+    imageCache.set(url, p);
+    return p;
+  };
+
+  const renderSpecToCanvas = (
+    canvas: HTMLCanvasElement,
+    spec: Studio3DAngleSpec,
+    img: HTMLImageElement,
+    drapeImg: HTMLImageElement | null
+  ): ImageData => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.clearRect(0, 0, TEX_W, TEX_H);
+
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+
+    let sx = 0;
+    let sy = 0;
+    let sw = iw;
+    let sh = ih;
+
+    if (spec.isCompositeSheet && spec.sheetCrop) {
+      sx = Math.round(spec.sheetCrop.sxNorm * iw);
+      sw = Math.round(spec.sheetCrop.swNorm * iw);
+    }
+
+    const scale = Math.min((TEX_W * 0.96) / sw, (TEX_H * 0.98) / sh);
+    const dw = Math.round(sw * scale);
+    const dh = Math.round(sh * scale);
+    const dx = Math.round((TEX_W - dw) / 2);
+    // Align bottom so shoes sit right near the bottom edge of the 3D plane on the turntable
+    const dy = Math.round(TEX_H - dh);
+
+    ctx.save();
+    if (spec.mirrorHorizontally) {
+      ctx.translate(TEX_W, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.restore();
+
+    const imgData = ctx.getImageData(0, 0, TEX_W, TEX_H);
+    keyOutStudioBackdropFromRgba(imgData.data, TEX_W, TEX_H);
+    ctx.putImageData(imgData, 0, 0);
+
+    // If a custom shop/closet garment is being tried on that isn't pre-baked into the studio frame,
+    // drape it onto the upper torso just like Turntable360Viewer does
+    if (drapeImg) {
+      const gw = drapeImg.naturalWidth || drapeImg.width;
+      const gh = drapeImg.naturalHeight || drapeImg.height;
+      if (gw > 8 && gh > 8) {
+        const isProfile = spec.angle === 90 || spec.angle === 270;
+        const drapeW = Math.round(TEX_W * (isProfile ? 0.34 : 0.46));
+        const drapeH = Math.round(TEX_H * 0.36);
+        const drapeX = Math.round((TEX_W - drapeW) / 2);
+        const drapeY = Math.round(TEX_H * 0.175);
+        ctx.save();
+        ctx.drawImage(drapeImg, 0, 0, gw, gh, drapeX, drapeY, drapeW, drapeH);
+        ctx.restore();
+      }
+    }
+
+    return ctx.getImageData(0, 0, TEX_W, TEX_H);
+  };
+
+  Promise.all([
+    Promise.all(dressedSpecs.map((s) => loadImg(s.imageUrl))),
+    Promise.all(rawSpecs.map((s) => loadImg(s.imageUrl))),
+    shouldDrapeOverlay ? loadImg(drapeFrontUrl) : Promise.resolve(null),
+    shouldDrapeOverlay ? loadImg(drapeBackUrl || drapeFrontUrl) : Promise.resolve(null),
+  ]).then(([dressedImgs, rawImgs, frontDrapeImg, backDrapeImg]) => {
+    if (cancelled) return;
+
+    for (let i = 0; i < 8; i++) {
+      const dSpec = dressedSpecs[i];
+      const dImg = dressedImgs[i] || dressedImgs[0];
+      if (dImg) {
+        const isRear = dSpec.angle === 135 || dSpec.angle === 180 || dSpec.angle === 225;
+        const activeDrape = shouldDrapeOverlay
+          ? isRear
+            ? backDrapeImg || frontDrapeImg
+            : frontDrapeImg
+          : null;
+        dressedBaseImageData[i] = renderSpecToCanvas(
+          dressedCanvases[i],
+          dSpec,
+          dImg,
+          activeDrape
+        );
+        dressedTextures[i].needsUpdate = true;
+      }
+
+      const rSpec = rawSpecs[i];
+      const rImg = rawImgs[i] || dImg;
+      if (rImg) {
+        const rCanvas = rawTextures[i].image as HTMLCanvasElement;
+        renderSpecToCanvas(rCanvas, rSpec, rImg, null);
+        rawTextures[i].needsUpdate = true;
+      }
+    }
+
+    onLoaded();
+  });
+
+  // Allows subtle tailoring swatch / wardrobe line garment tinting on the blazer region
+  // while keeping the original studio photo 100% untouched when targetHex is null or default cream (0xebe3d2)
+  const applyBlazerTintHex = (targetHex: number | null) => {
+    if (cancelled) return;
+    const isDefaultCream = targetHex === null || targetHex === 0xebe3d2;
+    const tR = targetHex ? (targetHex >> 16) & 255 : 235;
+    const tG = targetHex ? (targetHex >> 8) & 255 : 227;
+    const tB = targetHex ? targetHex & 255 : 210;
+
+    for (let i = 0; i < 8; i++) {
+      const baseData = dressedBaseImageData[i];
+      if (!baseData) continue;
+      const ctx = dressedCanvases[i].getContext('2d', { willReadFrequently: true })!;
+      if (isDefaultCream) {
+        ctx.putImageData(baseData, 0, 0);
+        dressedTextures[i].needsUpdate = true;
+        continue;
+      }
+
+      const working = new ImageData(
+        new Uint8ClampedArray(baseData.data),
+        TEX_W,
+        TEX_H
+      );
+      const buf = working.data;
+      const yMin = Math.floor(TEX_H * 0.165);
+      const yMax = Math.floor(TEX_H * 0.545);
+
+      for (let y = yMin; y <= yMax; y++) {
+        for (let x = 0; x < TEX_W; x++) {
+          const idx = (y * TEX_W + x) * 4;
+          const a = buf[idx + 3];
+          if (a < 30) continue;
+          const r = buf[idx];
+          const g = buf[idx + 1];
+          const b = buf[idx + 2];
+          const lum = (r + g + b) / 3;
+          // Match the cream/sand blazer fabric (warm ecru: r > g > b, high luminance, low red-green delta so skin is excluded)
+          if (lum >= 145 && r - b >= 12 && r - g <= 17 && g >= b) {
+            const shade = lum / 222;
+            buf[idx] = Math.min(255, Math.round(r * 0.25 + tR * shade * 0.75));
+            buf[idx + 1] = Math.min(255, Math.round(g * 0.25 + tG * shade * 0.75));
+            buf[idx + 2] = Math.min(255, Math.round(b * 0.25 + tB * shade * 0.75));
+          }
+        }
+      }
+      ctx.putImageData(working, 0, 0);
+      dressedTextures[i].needsUpdate = true;
+    }
+    onLoaded();
+  };
+
+  return {
+    dressedTextures,
+    rawTextures,
+    applyBlazerTintHex,
+    dispose: () => {
+      cancelled = true;
+      dressedTextures.forEach((t) => t.dispose());
+      rawTextures.forEach((t) => t.dispose());
+    },
+  };
+}
+
 export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
   measurements,
   heightCm,
+  userFrontImage,
+  userBackImage,
+  userSideImage,
+  frontLandmarks,
+  backLandmarks,
+  sideLandmarks,
+  studioFrames,
+  activeGarmentName,
+  activeGarmentId,
+  garmentFrontImage,
+  garmentBackImage,
+  onPhotoUpload,
+  onOpenPhotoSetup,
   trueSize,
   recommendedSize,
-  activePassIndex,
-  onSelectPassIndex,
-  iterations,
-  activePass,
-  allPasses,
-  onSelectPass,
   activeOutfit,
   existingWardrobe = [],
   shopCatalog = [],
   onTryOnClosetItem,
   onTryOnShopProduct,
   onTryOnOutfitSlot,
-  initialSection = 'overview',
+  initialSection = 'mannequin',
+  verticalScreenLocked,
+  onToggleVerticalScreenLock,
+  onScrollToFeedBelow,
 }) => {
   const effectiveTrueSize = trueSize || recommendedSize || 'M';
-  const effectiveIterations = iterations || allPasses;
-  const effectivePassIndex =
-    activePassIndex !== undefined
-      ? activePassIndex
-      : activePass
-        ? Math.max(0, activePass.iteration - 1)
-        : 2;
+  const effectivePassIndex = 2;
+
+  // Fallback to calibrated 3-view user portrait preset when explicit photo props are omitted
+  const defaultPreset = DEMO_PRESETS[0];
+  const [localFrontPhoto, setLocalFrontPhoto] = useState<string | undefined>(undefined);
+  const [localBackPhoto, setLocalBackPhoto] = useState<string | undefined>(undefined);
+  const [localSidePhoto, setLocalSidePhoto] = useState<string | undefined>(undefined);
+
+  const effectiveFrontPhoto =
+    localFrontPhoto || userFrontImage || defaultPreset.shopperFrontImage;
+  const effectiveBackPhoto =
+    localBackPhoto || userBackImage || defaultPreset.shopperBackImage;
+  const effectiveSidePhoto =
+    localSidePhoto || userSideImage || defaultPreset.shopperSideImage;
+
+  const effectiveFrontLandmarks = frontLandmarks || defaultPreset.frontLandmarks;
+  const effectiveBackLandmarks = backLandmarks || defaultPreset.backLandmarks;
+  const effectiveSideLandmarks = sideLandmarks || defaultPreset.sideLandmarks;
+
+  const bodySpec3D = build3DBodySpecFromUserPhotos({
+    heightCm,
+    measurements,
+    frontLandmarks: effectiveFrontLandmarks,
+    backLandmarks: effectiveBackLandmarks,
+    sideLandmarks: effectiveSideLandmarks,
+    hasFrontImage: Boolean(effectiveFrontPhoto),
+    hasBackImage: Boolean(effectiveBackPhoto),
+    hasSideImage: Boolean(effectiveSidePhoto),
+  });
+
   const mountRef = useRef<HTMLDivElement>(null);
   const [selectedSwatch, setSelectedSwatch] = useState<FabricSwatch>(FABRIC_SWATCHES[0]);
   const [explodeFactor, setExplodeFactor] = useState<number>(0);
   const [activeSection, setActiveSection] = useState<ClosetSectionId>(initialSection);
   const [isDockCollapsed, setIsDockCollapsed] = useState<boolean>(false);
   const [isFullBleed, setIsFullBleed] = useState<boolean>(false);
+  const [isVerticalLocked, setIsVerticalLocked] = useState<boolean>(
+    verticalScreenLocked !== undefined ? verticalScreenLocked : true
+  );
+  const [showBayInventoryDrawer, setShowBayInventoryDrawer] = useState<boolean>(false);
+  const [photo3DMode, setPhoto3DMode] = useState<Photo3DDisplayMode>('photo_twin_dressed');
+  const [showPhoto3DInspector, setShowPhoto3DInspector] = useState<boolean>(false);
 
-  // 3D Human Walker UI state (throttled updates from animation loop)
-  const [humanTargetIndex, setHumanTargetIndex] = useState<number>(1);
+  // Sync controlled verticalScreenLocked prop if provided by parent
+  useEffect(() => {
+    if (verticalScreenLocked !== undefined) {
+      setIsVerticalLocked(verticalScreenLocked);
+    }
+  }, [verticalScreenLocked]);
+
+  // 360° Fitting Studio Turntable Angle & Wardrobe Line Selection State
+  const [activeStudioAngle, setActiveStudioAngle] = useState<number>(0);
+  const [isAutoSpin360, setIsAutoSpin360] = useState<boolean>(false);
+  const [humanTargetIndex, setHumanTargetIndex] = useState<number>(0);
   const [humanEquippedIndex, setHumanEquippedIndex] = useState<number>(0);
-  const [humanPhase, setHumanPhase] = useState<string>('walking_to_rack');
-  const [humanAutoWalk, setHumanAutoWalk] = useState<boolean>(true);
+  const [humanPhase, setHumanPhase] = useState<string>('inspecting_at_mirror');
+  const [humanAutoWalk, setHumanAutoWalk] = useState<boolean>(false);
 
   const sceneRefs = useRef<{
     requestRender?: () => void;
     updateMaterials?: (swatch: FabricSwatch) => void;
     updatePassGeometry?: (passIdx: number, explode: number) => void;
-    setCameraTarget?: (pos: [number, number, number], lookAt: [number, number, number]) => void;
+    setCameraTarget?: (pos: [number, number, number], lookAt: [number, number, number], sectionId?: ClosetSectionId) => void;
+    applyVerticalLockConstraints?: (locked: boolean, dockCollapsed: boolean, recenterMannequin?: boolean) => void;
     highlightBay?: (section: ClosetSectionId) => void;
     commandHumanSelect?: (itemIdx: number, keepAuto?: boolean) => void;
     setHumanAutoCycle?: (auto: boolean) => void;
+    setPhoto3DDisplayMode?: (mode: Photo3DDisplayMode) => void;
+    setManualStudioAngleDeg?: (deg: number) => void;
+    setAutoSpinStudio360?: (auto: boolean) => void;
   }>({});
 
   useEffect(() => {
@@ -381,7 +691,16 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       50
     );
     const startBay = CLOSET_BAYS.find((b) => b.id === initialSection) || CLOSET_BAYS[0];
-    camera.position.set(...startBay.camPos);
+    const initialLockSpec = computeMannequinVerticalLockCameraSpec({
+      verticalLocked: isVerticalLocked && startBay.id === 'mannequin',
+      statureScaleY: bodySpec3D.scales.statureY,
+      isDockCollapsed,
+    });
+    if (startBay.id === 'mannequin') {
+      camera.position.set(...initialLockSpec.camPos);
+    } else {
+      camera.position.set(...startBay.camPos);
+    }
 
     // 3. PMREM RoomEnvironment for realistic metallic/fabric/glass reflections
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -391,14 +710,22 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     roomEnv.dispose();
     pmremGenerator.dispose();
 
-    // 4. OrbitControls with smooth damping
+    // 4. OrbitControls with vertical polar lock when Mannequin Focus Lock is enabled
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = !isSoftwareGl;
     controls.dampingFactor = 0.06;
-    controls.target.set(...startBay.lookAt);
-    controls.minDistance = 1.25;
-    controls.maxDistance = 7.5;
-    controls.maxPolarAngle = Math.PI * 0.51;
+    if (startBay.id === 'mannequin') {
+      controls.target.set(...initialLockSpec.lookAt);
+    } else {
+      controls.target.set(...startBay.lookAt);
+    }
+    controls.minDistance = initialLockSpec.minDistance;
+    controls.maxDistance = initialLockSpec.maxDistance;
+    controls.minPolarAngle = initialLockSpec.minPolarAngle;
+    controls.maxPolarAngle = initialLockSpec.maxPolarAngle;
+    controls.enablePan = initialLockSpec.enablePan;
+    controls.enableZoom = initialLockSpec.enableZoom;
+    let verticalLockActiveInScene = isVerticalLocked;
 
     // 5. Warm Architectural Closet Lighting Rig
     const hemiLight = new THREE.HemisphereLight(0xfff7ed, 0x1e1b18, 0.85);
@@ -951,7 +1278,7 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     // SECTION 6 (FRONT-RIGHT BOUTIQUE ISLAND): ILLUMINATED HOROLOGY WATCH VITRINE
     // ========================================================================
     const watchIslandGroup = new THREE.Group();
-    watchIslandGroup.position.set(1.38, -0.9, 0.78);
+    watchIslandGroup.position.set(1.88, -0.9, 0.45);
     watchIslandGroup.rotation.y = -0.35;
     scene.add(watchIslandGroup);
     clickableGroups.push({ group: watchIslandGroup, sectionId: 'watches' });
@@ -1049,15 +1376,74 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     bayGlowMeshes.watches = watchIslandGlow;
 
     // ========================================================================
-    // SECTION 7 (CENTER STAGE): 10-PART CALIBRATED 360° MANNEQUIN & TURNTABLE
+    // SECTION 7 (CENTER STAGE): 360° FITTING STUDIO PHOTO MODEL & TURNTABLE
     // ========================================================================
     const mannequinGroup = new THREE.Group();
     scene.add(mannequinGroup);
     clickableGroups.push({ group: mannequinGroup, sectionId: 'mannequin' });
 
-    const chestScale = (measurements.chest || 99) / 99;
-    const waistScale = (measurements.waist || 95) / 95;
-    const hipScale = (measurements.hip || 93) / 93;
+    const waistScale = bodySpec3D.scales.waistX;
+    const statureScaleY = bodySpec3D.scales.statureY;
+    const depthRatioZ = Number(
+      Math.min(
+        Math.max(bodySpec3D.chestDepthCm / Math.max(bodySpec3D.chestWidthCm, 24), 0.58),
+        0.95
+      ).toFixed(3)
+    );
+
+    const isPrebakedZaraOrLinen =
+      !activeGarmentId ||
+      activeGarmentId.includes('zara-comfort') ||
+      activeGarmentId === 'wardrobe-zara-blazer' ||
+      activeGarmentId === 'relaxed-linen-overshirt' ||
+      activeGarmentId === 'wardrobe-linen-overshirt' ||
+      activeGarmentId === 'jordan-linen';
+
+    const firstFrameUrl = studioFrames?.[0]?.imageUrl || '';
+    const isAiSynthesizedFrame =
+      firstFrameUrl.startsWith('data:image/png') ||
+      firstFrameUrl.startsWith('data:image/jpeg') ||
+      firstFrameUrl.startsWith('data:image/webp');
+
+    const shouldDrapeCustomGarment =
+      !isPrebakedZaraOrLinen && !isAiSynthesizedFrame && Boolean(garmentFrontImage);
+
+    const dressedAngleSpecs = resolveStudioTurntableFramesFor3D({
+      studioFrames,
+      presetFramesBySize: defaultPreset.framesBySize,
+      selectedSize: effectiveTrueSize,
+      fallbackFrontUrl: effectiveFrontPhoto,
+    });
+
+    const rawAngleSpecs = resolveStudioTurntableFramesFor3D({
+      studioFrames: STUDIO_TURNTABLE_ANGLES.map((angle) => ({
+        angle,
+        label: `${angle}°`,
+        imageUrl:
+          angle === 135 || angle === 180 || angle === 225
+            ? effectiveBackPhoto
+            : angle === 90 || angle === 270
+              ? effectiveSidePhoto || effectiveFrontPhoto
+              : effectiveFrontPhoto,
+        status: 'ready' as const,
+      })),
+      presetFramesBySize: defaultPreset.framesBySize,
+      selectedSize: effectiveTrueSize,
+      fallbackFrontUrl: effectiveFrontPhoto,
+    });
+
+    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+    const studioTurntableTextures = createStudio360TurntableTextures(
+      dressedAngleSpecs,
+      rawAngleSpecs,
+      garmentFrontImage,
+      garmentBackImage,
+      shouldDrapeCustomGarment,
+      maxAniso,
+      () => {
+        renderer.render(scene, camera);
+      }
+    );
 
     // Part 1: Illuminated Turntable Degree Pedestal
     const pedestalGeo = new THREE.CylinderGeometry(1.08, 1.16, 0.11, 64);
@@ -1079,190 +1465,89 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     brassRimMesh.position.y = -0.79;
     mannequinGroup.add(brassRimMesh);
 
-    // Part 2: Sculpted Mannequin Torso Core (LatheGeometry)
-    const torsoPoints = [
-      new THREE.Vector2(0.0, -0.15),
-      new THREE.Vector2(0.21 * hipScale, -0.12),
-      new THREE.Vector2(0.195 * waistScale, 0.14),
-      new THREE.Vector2(0.235 * chestScale, 0.44),
-      new THREE.Vector2(0.255 * chestScale, 0.62),
-      new THREE.Vector2(0.095, 0.72),
-      new THREE.Vector2(0.085, 0.85),
-      new THREE.Vector2(0.0, 0.86),
-    ];
-    const torsoGeo = new THREE.LatheGeometry(torsoPoints, 48);
-    const mannequinCoreMat = new THREE.MeshStandardMaterial({
-      color: 0xd6d3d1,
-      roughness: 0.45,
-      metalness: 0.1,
+    // Soft radial contact shadow under the 360° Fitting Studio model's shoes on the turntable
+    const footShadowGeo = new THREE.CircleGeometry(0.42, 32);
+    const footShadowMat = new THREE.MeshBasicMaterial({
+      color: 0x05070c,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
     });
-    const torsoMesh = new THREE.Mesh(torsoGeo, mannequinCoreMat);
-    torsoMesh.scale.set(1.18, 1.0, 0.78);
-    torsoMesh.castShadow = true;
-    mannequinGroup.add(torsoMesh);
+    const footShadowDisc = new THREE.Mesh(footShadowGeo, footShadowMat);
+    footShadowDisc.rotation.x = -Math.PI / 2;
+    footShadowDisc.position.set(0, -0.781, 0);
+    mannequinGroup.add(footShadowDisc);
 
-    // Part 3: Brushed Brass Neck Finial
-    const finialMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.082, 32, 24),
-      brushedBrassMat
-    );
-    finialMesh.position.set(0, 0.92, 0);
-    mannequinGroup.add(finialMesh);
-
-    // Part 4: Slot 2 — Layering Crewneck Tee
-    const teeMat = new THREE.MeshStandardMaterial({
-      color: selectedSwatch.teeHex,
-      bumpMap: weaveTex,
-      bumpScale: 0.004,
-      roughness: 0.75,
-    });
-    const teePoints = [
-      new THREE.Vector2(0.205 * hipScale, -0.05),
-      new THREE.Vector2(0.202 * waistScale, 0.15),
-      new THREE.Vector2(0.242 * chestScale, 0.44),
-      new THREE.Vector2(0.26 * chestScale, 0.63),
-      new THREE.Vector2(0.105, 0.73),
-    ];
-    const teeMesh = new THREE.Mesh(new THREE.LatheGeometry(teePoints, 48), teeMat);
-    teeMesh.scale.set(1.19, 1.0, 0.79);
-    mannequinGroup.add(teeMesh);
-
-    // Part 5: Slot 1 — Structured Blazer Shell + Beveled Lapels
-    const blazerGroup = new THREE.Group();
-    const blazerMat = new THREE.MeshStandardMaterial({
-      color: selectedSwatch.blazerHex,
-      bumpMap: weaveTex,
-      bumpScale: 0.006,
-      roughness: selectedSwatch.roughness,
-      metalness: 0.06,
+    // Part 2: Full-Body Photorealistic 360° Fitting Studio Model on the Central Turntable
+    const photoPlaneHeight = 1.56 * statureScaleY;
+    const photoPlaneWidth = photoPlaneHeight * 0.75;
+    const studioPhotoGeo = new THREE.PlaneGeometry(photoPlaneWidth, photoPlaneHeight);
+    const studioPhotoMat = new THREE.MeshBasicMaterial({
+      map: studioTurntableTextures.dressedTextures[0],
+      transparent: true,
+      alphaTest: 0.04,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
+    const studioPhotoMesh = new THREE.Mesh(studioPhotoGeo, studioPhotoMat);
+    // Position so the model's shoes at the bottom of the frame rest squarely on the turntable top (y = -0.785)
+    studioPhotoMesh.position.set(0, -0.785 + photoPlaneHeight * 0.5, 0);
+    mannequinGroup.add(studioPhotoMesh);
 
-    const blazerPoints = [
-      new THREE.Vector2(0.235 * hipScale, -0.18),
-      new THREE.Vector2(0.222 * waistScale, 0.14),
-      new THREE.Vector2(0.262 * chestScale, 0.44),
-      new THREE.Vector2(0.282 * chestScale, 0.64),
-      new THREE.Vector2(0.125, 0.74),
-    ];
-    const blazerShell = new THREE.Mesh(
-      new THREE.LatheGeometry(blazerPoints, 48, 0.35, Math.PI * 2 - 0.7),
-      blazerMat
+    // Part 3: Tri-Fold Atelier Mirror Reflection of the 360° Fitting Studio Photo (Rear 180° View)
+    const mirrorReflectionMat = new THREE.MeshBasicMaterial({
+      map: studioTurntableTextures.dressedTextures[4], // 180° Back view
+      transparent: true,
+      opacity: 0.58,
+      alphaTest: 0.04,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const mirrorReflectionMesh = new THREE.Mesh(studioPhotoGeo, mirrorReflectionMat);
+    mirrorReflectionMesh.position.set(0, -0.785 + photoPlaneHeight * 0.48, -2.46);
+    mirrorReflectionMesh.scale.set(0.92, 0.92, 1);
+    scene.add(mirrorReflectionMesh);
+
+    // Part 4: Illuminated 3D Photo-Landmark Cross-Section Rings (Shoulders, Chest, Waist, Hip)
+    // Shown when inspecting Raw 3D Photo Scan + Slices or when Fit Caliper slider > 0
+    const landmarkRingsGroup = new THREE.Group();
+    landmarkRingsGroup.visible = false;
+    const ringStations = bodySpec3D.slices.filter((s) =>
+      ['hip', 'waist', 'chest', 'shoulders'].includes(s.stationId)
     );
-    blazerShell.rotation.y = Math.PI / 2;
-    blazerShell.scale.set(0.82, 1.0, 1.22);
-    blazerShell.castShadow = true;
-    blazerGroup.add(blazerShell);
-
-    const lapelShape = new THREE.Shape();
-    lapelShape.moveTo(0, 0);
-    lapelShape.lineTo(0.085, 0.24);
-    lapelShape.lineTo(0.035, 0.28);
-    lapelShape.lineTo(0.065, 0.48);
-    lapelShape.lineTo(0, 0.52);
-    lapelShape.closePath();
-
-    const lapelGeo = new THREE.ExtrudeGeometry(lapelShape, {
-      depth: 0.016,
-      bevelEnabled: true,
-      bevelThickness: 0.005,
-      bevelSize: 0.004,
-      bevelSegments: 3,
-    });
-
-    const leftLapel = new THREE.Mesh(lapelGeo, blazerMat);
-    leftLapel.position.set(-0.09, 0.18, 0.215 * chestScale);
-    leftLapel.rotation.z = 0.14;
-    blazerGroup.add(leftLapel);
-
-    const rightLapel = new THREE.Mesh(lapelGeo, blazerMat);
-    rightLapel.scale.x = -1;
-    rightLapel.position.set(0.09, 0.18, 0.215 * chestScale);
-    rightLapel.rotation.z = -0.14;
-    blazerGroup.add(rightLapel);
-
-    // Part 6 & 7: Left & Right Articulated Sleeves (TubeGeometry)
-    const buildSleeveMesh = (sign: 1 | -1) => {
-      const curve = new THREE.CatmullRomCurve3([
-        new THREE.Vector3(sign * 0.31 * chestScale, 0.58, 0.0),
-        new THREE.Vector3(sign * 0.36 * chestScale, 0.3, 0.03),
-        new THREE.Vector3(sign * 0.35 * chestScale, -0.02, 0.06),
-      ]);
-      const mesh = new THREE.Mesh(
-        new THREE.TubeGeometry(curve, 24, 0.072, 18, false),
-        blazerMat
+    ringStations.forEach((st) => {
+      const ringColor =
+        st.stationId === 'chest'
+          ? 0x38bdf8
+          : st.stationId === 'waist'
+            ? 0x10b981
+            : st.stationId === 'hip'
+              ? 0xa855f7
+              : 0xf59e0b;
+      const ringMesh = new THREE.Mesh(
+        new THREE.TorusGeometry(st.radiusWidthX * 1.85, 0.0055, 12, 64),
+        new THREE.MeshBasicMaterial({ color: ringColor, transparent: true, opacity: 0.82 })
       );
-      mesh.castShadow = true;
-      return mesh;
-    };
-    const leftSleeve = buildSleeveMesh(-1);
-    const rightSleeve = buildSleeveMesh(1);
-    blazerGroup.add(leftSleeve);
-    blazerGroup.add(rightSleeve);
-    mannequinGroup.add(blazerGroup);
-
-    // Part 8: Slot 4 — 40mm Brushed Steel Chronograph on Left Wrist
-    const watchGroup = new THREE.Group();
-    watchGroup.position.set(-0.35 * chestScale, -0.01, 0.06);
-    watchGroup.add(
-      new THREE.Mesh(
-        new THREE.TorusGeometry(0.064, 0.015, 16, 32),
-        new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.5 })
-      )
-    );
-    const wristCase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.036, 0.036, 0.016, 24),
-      brushedSteelMat
-    );
-    wristCase.position.set(-0.055, 0, 0.03);
-    wristCase.rotation.z = Math.PI / 2;
-    watchGroup.add(wristCase);
-    mannequinGroup.add(watchGroup);
-
-    // Part 9: Slot 3 — Tailored Pleated Trousers
-    const trouserGroup = new THREE.Group();
-    const trouserMat = new THREE.MeshStandardMaterial({
-      color: selectedSwatch.trouserHex,
-      bumpMap: weaveTex,
-      bumpScale: 0.005,
-      roughness: 0.68,
+      ringMesh.rotation.x = Math.PI / 2;
+      ringMesh.scale.set(1.0, depthRatioZ, 1.0);
+      ringMesh.position.y = st.yMeters;
+      landmarkRingsGroup.add(ringMesh);
     });
-    const leftLeg = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.115 * hipScale, 0.088, 0.62, 24),
-      trouserMat
-    );
-    leftLeg.position.set(-0.125 * hipScale, -0.44, 0);
-    const rightLeg = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.115 * hipScale, 0.088, 0.62, 24),
-      trouserMat
-    );
-    rightLeg.position.set(0.125 * hipScale, -0.44, 0);
-    trouserGroup.add(leftLeg);
-    trouserGroup.add(rightLeg);
-    mannequinGroup.add(trouserGroup);
+    mannequinGroup.add(landmarkRingsGroup);
 
-    // Part 10: Slot 5 — Goodyear-Welted Loafers on Pedestal
-    const shoeGroup = new THREE.Group();
-    const loaferMat = new THREE.MeshStandardMaterial({
-      color: 0x4a2c18,
-      roughness: 0.48,
-      metalness: 0.1,
+    // Waist Caliper Ease Ring around the 360° Studio Model
+    const caliperMat = new THREE.MeshBasicMaterial({
+      color: 0x10b981,
+      transparent: true,
+      opacity: 0.0,
     });
-    for (const sign of [-1, 1]) {
-      const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.07, 0.24), loaferMat);
-      shoe.position.set(sign * 0.125 * hipScale, -0.76, 0.04);
-      shoeGroup.add(shoe);
-    }
-    mannequinGroup.add(shoeGroup);
-
-    // Waist Caliper Tension Ring (Pass 1 = red strain, Pass 2 = amber, Pass 3 = emerald)
-    const caliperMat = new THREE.MeshBasicMaterial({ color: 0x10b981 });
     const caliperRing = new THREE.Mesh(
       new THREE.TorusGeometry(0.285 * waistScale, 0.006, 12, 64),
       caliperMat
     );
     caliperRing.rotation.x = Math.PI / 2;
     caliperRing.position.y = 0.16;
+    caliperRing.visible = false;
     mannequinGroup.add(caliperRing);
 
     // 32-Instance Anthropometric Sensor Ring around Pedestal
@@ -1287,345 +1572,98 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     mannequinGroup.add(sensorRing);
 
     // ========================================================================
-    // SECTION 7: ARTICULATED 3D HUMAN WALKING & SELECTING CLOTHING FROM THE LINE
+    // WARDROBE LINE SELECTION & 360° STUDIO TURNTABLE CONTROLLER
     // ========================================================================
-    let walkerState: HumanWalkerState = createInitialHumanWalkerState(1);
-    // Advance initial pose slightly so first paint shows human mid-stride approaching the line
-    walkerState = stepHumanWalkerState(walkerState, 0.08);
-    walkerState = stepHumanWalkerState(walkerState, 0.08);
-
-    const humanRootGroup = new THREE.Group();
-    humanRootGroup.position.set(walkerState.x, -0.9, walkerState.z);
-    humanRootGroup.rotation.y = walkerState.yaw;
-    scene.add(humanRootGroup);
-    clickableGroups.push({ group: humanRootGroup, sectionId: 'human' });
-
-    // Soft radial contact shadow disc under the walking 3D human
-    const humanShadowDisc = new THREE.Mesh(
-      new THREE.CircleGeometry(0.34, 24),
-      new THREE.MeshBasicMaterial({
-        color: 0x05070b,
-        transparent: true,
-        opacity: 0.44,
-        depthWrite: false,
-      })
-    );
-    humanShadowDisc.rotation.x = -Math.PI / 2;
-    humanShadowDisc.position.y = 0.015;
-    humanRootGroup.add(humanShadowDisc);
-
-    // Subtle selection target ring on the floor beneath the human
-    const humanTargetRing = new THREE.Mesh(
-      new THREE.RingGeometry(0.28, 0.32, 32),
-      new THREE.MeshBasicMaterial({
-        color: 0x818cf8,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.55,
-      })
-    );
-    humanTargetRing.rotation.x = -Math.PI / 2;
-    humanTargetRing.position.y = 0.018;
-    humanRootGroup.add(humanTargetRing);
-
-    const skinMat = new THREE.MeshStandardMaterial({
-      color: 0xdab496,
-      roughness: 0.58,
-      metalness: 0.04,
-    });
-    const hairMat = new THREE.MeshStandardMaterial({
-      color: 0x1e1815,
-      roughness: 0.72,
-    });
-    const humanTrouserMat = new THREE.MeshStandardMaterial({
-      color: 0x1e242d,
-      bumpMap: weaveTex,
-      bumpScale: 0.004,
-      roughness: 0.68,
-    });
-    const initialEquipped = WARDROBE_LINE_ITEMS[walkerState.equippedItemIndex];
-    const humanJacketMat = new THREE.MeshStandardMaterial({
-      color: initialEquipped.garmentColorHex,
-      bumpMap: weaveTex,
-      bumpScale: 0.005,
-      roughness: initialEquipped.garmentRoughness,
-    });
-    const humanShirtMat = new THREE.MeshStandardMaterial({
-      color: 0xf8fafc,
-      roughness: 0.65,
-    });
-    const humanShoeMat = new THREE.MeshStandardMaterial({
-      color: 0x3b2314,
-      roughness: 0.42,
-      metalness: 0.12,
-    });
-
-    // Pelvis Root at y = 0.86m above closet floor
-    const pelvisGroup = new THREE.Group();
-    pelvisGroup.position.set(0, 0.86, 0);
-    humanRootGroup.add(pelvisGroup);
-
-    const pelvisMesh = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.155, 0.145, 0.14, 20),
-      humanTrouserMat
-    );
-    pelvisGroup.add(pelvisMesh);
-
-    // Left & Right Articulated Legs (Hip Pivot -> Thigh -> Knee Pivot -> Calf -> Loafer)
-    const buildLegHierarchy = (sideSign: -1 | 1) => {
-      const hipPivot = new THREE.Group();
-      hipPivot.position.set(sideSign * 0.095, -0.04, 0);
-
-      const thighMesh = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.072, 0.058, 0.4, 16),
-        humanTrouserMat
-      );
-      thighMesh.position.set(0, -0.2, 0);
-      thighMesh.castShadow = !isSoftwareGl;
-      hipPivot.add(thighMesh);
-
-      const kneePivot = new THREE.Group();
-      kneePivot.position.set(0, -0.4, 0);
-      hipPivot.add(kneePivot);
-
-      const calfMesh = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.056, 0.044, 0.38, 16),
-        humanTrouserMat
-      );
-      calfMesh.position.set(0, -0.19, 0);
-      calfMesh.castShadow = !isSoftwareGl;
-      kneePivot.add(calfMesh);
-
-      const footGroup = new THREE.Group();
-      footGroup.position.set(0, -0.39, 0.035);
-      const shoeBase = new THREE.Mesh(
-        new THREE.BoxGeometry(0.088, 0.055, 0.21),
-        humanShoeMat
-      );
-      footGroup.add(shoeBase);
-      kneePivot.add(footGroup);
-
-      pelvisGroup.add(hipPivot);
-      return { hipPivot, kneePivot };
+    let walkerState: HumanWalkerState = {
+      ...createInitialHumanWalkerState(0),
+      autoCycleEnabled: false,
     };
-
-    const leftLegRig = buildLegHierarchy(-1);
-    const rightLegRig = buildLegHierarchy(1);
-
-    // Articulated Torso Pivot
-    const torsoPivot = new THREE.Group();
-    torsoPivot.position.set(0, 0.06, 0);
-    pelvisGroup.add(torsoPivot);
-
-    // Tailored Jacket Torso + Inner Supima Crewneck + Lapels
-    const torsoJacketMesh = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.185, 0.155, 0.52, 24),
-      humanJacketMat
-    );
-    torsoJacketMesh.scale.set(1.06, 1.0, 0.72);
-    torsoJacketMesh.position.set(0, 0.26, 0);
-    torsoJacketMesh.castShadow = !isSoftwareGl;
-    torsoPivot.add(torsoJacketMesh);
-
-    const innerShirtV = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.125, 0.11, 0.53, 16),
-      humanShirtMat
-    );
-    innerShirtV.scale.set(0.65, 1.0, 0.76);
-    innerShirtV.position.set(0, 0.265, 0.012);
-    torsoPivot.add(innerShirtV);
-
-    // Left & Right Jacket Lapels on the 3D Human
-    for (const lSign of [-1, 1] as const) {
-      const lapelStrip = new THREE.Mesh(
-        new THREE.BoxGeometry(0.055, 0.34, 0.025),
-        humanJacketMat
-      );
-      lapelStrip.position.set(lSign * 0.065, 0.32, 0.13);
-      lapelStrip.rotation.z = -lSign * 0.16;
-      torsoPivot.add(lapelStrip);
-    }
-
-    // Articulated Head & Styled Hair
-    const headPivot = new THREE.Group();
-    headPivot.position.set(0, 0.55, 0);
-    torsoPivot.add(headPivot);
-
-    const neckCyl = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.054, 0.06, 0.09, 16),
-      skinMat
-    );
-    neckCyl.position.set(0, 0.03, 0);
-    headPivot.add(neckCyl);
-
-    const headSphere = new THREE.Mesh(
-      new THREE.SphereGeometry(0.105, 24, 24),
-      skinMat
-    );
-    headSphere.scale.set(0.92, 1.08, 0.96);
-    headSphere.position.set(0, 0.14, 0);
-    headSphere.castShadow = !isSoftwareGl;
-    headPivot.add(headSphere);
-
-    const hairCap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.109, 20, 16, 0, Math.PI * 2, 0, Math.PI * 0.62),
-      hairMat
-    );
-    hairCap.scale.set(0.95, 1.09, 1.0);
-    hairCap.position.set(0, 0.148, -0.014);
-    hairCap.rotation.x = 0.28;
-    headPivot.add(hairCap);
-
-    // Sculpted Sunglasses / Brow Frame on the Front (+Z) Face
-    const glassesBridge = new THREE.Mesh(
-      new THREE.BoxGeometry(0.135, 0.026, 0.025),
-      new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.25, metalness: 0.8 })
-    );
-    glassesBridge.position.set(0, 0.155, 0.095);
-    headPivot.add(glassesBridge);
-
-    // Articulated Left & Right Arms (Shoulder Pivot -> Upper Sleeve -> Elbow Pivot -> Forearm -> Hand)
-    const buildArmHierarchy = (sideSign: -1 | 1) => {
-      const shoulderPivot = new THREE.Group();
-      shoulderPivot.position.set(sideSign * 0.215, 0.47, 0);
-
-      const upperArm = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.054, 0.046, 0.28, 16),
-        humanJacketMat
-      );
-      upperArm.position.set(0, -0.13, 0);
-      upperArm.castShadow = !isSoftwareGl;
-      shoulderPivot.add(upperArm);
-
-      const elbowPivot = new THREE.Group();
-      elbowPivot.position.set(0, -0.27, 0);
-      shoulderPivot.add(elbowPivot);
-
-      const forearm = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.044, 0.036, 0.26, 16),
-        humanJacketMat
-      );
-      forearm.position.set(0, -0.12, 0);
-      forearm.castShadow = !isSoftwareGl;
-      elbowPivot.add(forearm);
-
-      if (sideSign === -1) {
-        // Left wrist chronograph watch
-        const wristWatch = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.041, 0.041, 0.022, 16),
-          brushedBrassMat
-        );
-        wristWatch.position.set(0, -0.22, 0);
-        elbowPivot.add(wristWatch);
-      }
-
-      const handSphere = new THREE.Mesh(
-        new THREE.SphereGeometry(0.038, 14, 14),
-        skinMat
-      );
-      handSphere.scale.set(0.85, 1.15, 0.65);
-      handSphere.position.set(0, -0.27, 0);
-      elbowPivot.add(handSphere);
-
-      torsoPivot.add(shoulderPivot);
-      return { shoulderPivot, elbowPivot, handSphere };
-    };
-
-    const leftArmRig = buildArmHierarchy(-1);
-    const rightArmRig = buildArmHierarchy(1);
-
-    // Held Garment Hanger attached to the human's right hand when pulling a garment off the line
-    const heldGarmentGroup = new THREE.Group();
-    heldGarmentGroup.position.set(0, -0.31, 0.06);
-    heldGarmentGroup.visible = false;
-    const heldHangerBar = new THREE.Mesh(
-      new THREE.BoxGeometry(0.28, 0.025, 0.035),
-      darkWalnutTrimMat
-    );
-    heldGarmentGroup.add(heldHangerBar);
-    const heldGarmentMat = new THREE.MeshStandardMaterial({
-      color: WARDROBE_LINE_ITEMS[1].garmentColorHex,
-      bumpMap: weaveTex,
-      bumpScale: 0.004,
-      roughness: 0.65,
-    });
-    const heldGarmentFold = new THREE.Mesh(
-      new THREE.BoxGeometry(0.3, 0.52, 0.08),
-      heldGarmentMat
-    );
-    heldGarmentFold.position.set(0, -0.26, 0);
-    heldGarmentGroup.add(heldGarmentFold);
-    rightArmRig.elbowPivot.add(heldGarmentGroup);
-
-    // Apply pose helper for the 3D human character and the wardrobe line hangers
+    let manualStudioAngleDeg = 0;
+    let autoSpinStudioEnabled = false;
+    let currentDisplayMode: Photo3DDisplayMode = 'photo_twin_dressed';
     let lastSyncedEquippedIdx = walkerState.equippedItemIndex;
+    let lastSyncedAngle = -1;
     let lastUiSyncTime = 0;
 
-    const applyHumanPoseToMeshes = (state: HumanWalkerState, nowMs: number) => {
-      const pose = computeHumanJointPose(state);
-      humanRootGroup.position.set(state.x, -0.9, state.z);
-      humanRootGroup.rotation.y = state.yaw;
+    const updateStudioModelAndLine = (state: HumanWalkerState, nowMs: number) => {
+      // 1. Billboard the 360° Fitting Studio photo horizontally toward the active 3D camera
+      const camYaw = Math.atan2(camera.position.x, camera.position.z);
+      studioPhotoMesh.rotation.y = camYaw;
 
-      pelvisGroup.position.y = 0.86 + pose.pelvisBobY;
-      torsoPivot.rotation.x = pose.torsoPitch;
-      torsoPivot.rotation.y = pose.torsoTwistY;
-      headPivot.rotation.y = pose.headYaw;
-      headPivot.rotation.x = pose.headPitch;
+      // 2. Compute which of the 8 360° Fitting Studio angles [0, 45, 90, 135, 180, 225, 270, 315]
+      // matches the camera orbit + manual/auto turntable angle
+      const resolvedAngle = computeActiveStudioAngleFromCamera(
+        camera.position.x,
+        camera.position.z,
+        0,
+        0,
+        manualStudioAngleDeg
+      );
+      const activeTexArray =
+        currentDisplayMode === 'raw_photo_scan'
+          ? studioTurntableTextures.rawTextures
+          : studioTurntableTextures.dressedTextures;
 
-      leftLegRig.hipPivot.rotation.x = pose.leftHipPitch;
-      leftLegRig.kneePivot.rotation.x = pose.leftKneePitch;
-      rightLegRig.hipPivot.rotation.x = pose.rightHipPitch;
-      rightLegRig.kneePivot.rotation.x = pose.rightKneePitch;
+      const nextMainTex = activeTexArray[resolvedAngle.index] || activeTexArray[0];
+      if (studioPhotoMat.map !== nextMainTex) {
+        studioPhotoMat.map = nextMainTex;
+        studioPhotoMat.needsUpdate = true;
+      }
 
-      leftArmRig.shoulderPivot.rotation.x = pose.leftShoulderPitch;
-      leftArmRig.elbowPivot.rotation.x = pose.leftElbowPitch;
+      // Update rear reflection in the Tri-Fold Atelier Mirror ((index + 4) % 8 = opposite 180° hemisphere)
+      const mirrorIdx = (resolvedAngle.index + 4) % 8;
+      const nextMirrorTex = activeTexArray[mirrorIdx] || activeTexArray[4];
+      if (mirrorReflectionMat.map !== nextMirrorTex) {
+        mirrorReflectionMat.map = nextMirrorTex;
+        mirrorReflectionMat.needsUpdate = true;
+      }
 
-      rightArmRig.shoulderPivot.rotation.x = pose.rightShoulderPitch;
-      rightArmRig.shoulderPivot.rotation.z = pose.rightShoulderRoll;
-      rightArmRig.elbowPivot.rotation.x = pose.rightElbowPitch;
+      // Rotate the degree dial pedestal to match the manual/auto turntable spin
+      pedestalMesh.rotation.y = (-manualStudioAngleDeg * Math.PI) / 180;
 
-      // Animate the targeted hanger on the brass clothing line being pulled forward by the human
-      const targetItem = WARDROBE_LINE_ITEMS[state.targetItemIndex];
+      // 3. Animate the targeted hanger on the brass clothing line when selected
       coatUnitGroups.forEach((coatGrp, idx) => {
-        if (idx === state.targetItemIndex && state.activeHangerPull > 0.01) {
-          coatGrp.position.z = 0.05 + state.activeHangerPull * 0.24;
-          coatGrp.rotation.x = -state.activeHangerPull * 0.18;
+        const isSelectedHanger = idx === state.targetItemIndex;
+        const pullAmount =
+          state.autoCycleEnabled
+            ? idx === state.targetItemIndex
+              ? state.activeHangerPull
+              : 0
+            : isSelectedHanger
+              ? 0.85
+              : 0;
+        if (pullAmount > 0.01) {
+          coatGrp.position.z = 0.05 + pullAmount * 0.24;
+          coatGrp.rotation.x = -pullAmount * 0.16;
         } else {
           coatGrp.position.z = 0.05;
           coatGrp.rotation.x = 0;
         }
       });
 
-      // Show held garment in the human's hand during equipping transition
-      if (state.phase === 'equipping_garment' && targetItem) {
-        heldGarmentGroup.visible = true;
-        heldGarmentMat.color.setHex(targetItem.garmentColorHex);
-      } else {
-        heldGarmentGroup.visible = false;
-      }
-
-      // Update human's worn jacket & central mannequin when a new garment is equipped from the line
+      // 4. Update blazer tint when a new garment is equipped from the wardrobe line
       if (state.equippedItemIndex !== lastSyncedEquippedIdx) {
         lastSyncedEquippedIdx = state.equippedItemIndex;
         const equippedItem = WARDROBE_LINE_ITEMS[state.equippedItemIndex];
         if (equippedItem) {
-          humanJacketMat.color.setHex(equippedItem.garmentColorHex);
-          humanJacketMat.roughness = equippedItem.garmentRoughness;
-          blazerMat.color.setHex(equippedItem.garmentColorHex);
-          blazerMat.roughness = equippedItem.garmentRoughness;
+          studioTurntableTextures.applyBlazerTintHex(
+            state.equippedItemIndex === 0 ? null : equippedItem.garmentColorHex
+          );
         }
       }
 
-      // Throttle React HUD state updates to <= 5Hz so we never trigger 60Hz re-renders
-      if (nowMs - lastUiSyncTime > 220) {
+      // 5. Throttle React HUD state updates to <= 5Hz
+      if (nowMs - lastUiSyncTime > 200 || resolvedAngle.angle !== lastSyncedAngle) {
         lastUiSyncTime = nowMs;
+        lastSyncedAngle = resolvedAngle.angle;
+        setActiveStudioAngle(resolvedAngle.angle);
         setHumanTargetIndex(state.targetItemIndex);
         setHumanEquippedIndex(state.equippedItemIndex);
         setHumanPhase(state.phase);
       }
     };
 
-    applyHumanPoseToMeshes(walkerState, 0);
+    updateStudioModelAndLine(walkerState, 0);
 
     // ========================================================================
     // RAYCASTING CLICK-TO-FOCUS ON ANY 3D CLOSET BAY OR HANGING GARMENT ON LINE
@@ -1651,14 +1689,7 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       for (const lineHit of garmentLineHitGroups) {
         const hits = raycaster.intersectObjects(lineHit.group.children, true);
         if (hits.length > 0) {
-          walkerState = commandHumanSelectLineItem(
-            walkerState,
-            lineHit.itemIndex,
-            walkerState.autoCycleEnabled
-          );
-          setHumanTargetIndex(lineHit.itemIndex);
-          setHumanPhase('walking_to_rack');
-          applyHumanPoseToMeshes(walkerState, performance.now());
+          sceneRefs.current.commandHumanSelect?.(lineHit.itemIndex, false);
           return;
         }
       }
@@ -1670,9 +1701,7 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
           const bay = CLOSET_BAYS.find((b) => b.id === item.sectionId);
           if (bay) {
             setActiveSection(bay.id);
-            camera.position.set(...bay.camPos);
-            controls.target.set(...bay.lookAt);
-            controls.update();
+            sceneRefs.current.setCameraTarget?.(bay.camPos, bay.lookAt, bay.id);
             sceneRefs.current.highlightBay?.(bay.id);
           }
           break;
@@ -1680,8 +1709,23 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       }
     };
 
+    // When Vertical Screen Lock is active, intercept wheel events on the 3D stage
+    // to prevent vertical page drift and instead spin the 360° Mannequin horizontally
+    const handleCanvasWheel = (e: WheelEvent) => {
+      if (!verticalLockActiveInScene) return;
+      e.preventDefault();
+      e.stopPropagation();
+      autoSpinStudioEnabled = false;
+      setIsAutoSpin360(false);
+      const dominantDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      manualStudioAngleDeg = (((manualStudioAngleDeg + dominantDelta * 0.22) % 360) + 360) % 360;
+      updateStudioModelAndLine(walkerState, performance.now());
+      drawFrame();
+    };
+
     renderer.domElement.addEventListener('mousedown', handlePointerDown);
     renderer.domElement.addEventListener('mouseup', handlePointerUp);
+    renderer.domElement.addEventListener('wheel', handleCanvasWheel, { passive: false });
 
     // ========================================================================
     // RENDER LOOP & SOFTWARE-GL FENCE SYNC (THREE.JS SKILL PATTERN)
@@ -1726,8 +1770,14 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       const dt = Math.min((now - lastFrameTime) / 1000, 0.08);
       lastFrameTime = now;
 
-      walkerState = stepHumanWalkerState(walkerState, dt);
-      applyHumanPoseToMeshes(walkerState, now);
+      if (autoSpinStudioEnabled) {
+        manualStudioAngleDeg = (manualStudioAngleDeg + dt * 32) % 360;
+      }
+
+      if (walkerState.autoCycleEnabled) {
+        walkerState = stepHumanWalkerState(walkerState, dt);
+      }
+      updateStudioModelAndLine(walkerState, now);
 
       if (!isSoftwareGl) {
         controls.update();
@@ -1754,12 +1804,38 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       drawFrame();
     };
 
-    sceneRefs.current.commandHumanSelect = (itemIdx: number, keepAuto = true) => {
-      walkerState = commandHumanSelectLineItem(walkerState, itemIdx, keepAuto);
-      setHumanTargetIndex(walkerState.targetItemIndex);
-      setHumanPhase(walkerState.phase);
+    sceneRefs.current.setManualStudioAngleDeg = (deg: number) => {
+      autoSpinStudioEnabled = false;
+      setIsAutoSpin360(false);
+      // Align manualStudioAngleDeg so that relative to current camera azimuth, the requested studio angle is shown
+      const camDeg = (Math.atan2(camera.position.x, camera.position.z) * 180) / Math.PI;
+      manualStudioAngleDeg = (((deg - camDeg) % 360) + 360) % 360;
+      updateStudioModelAndLine(walkerState, performance.now());
+      drawFrame();
+    };
+
+    sceneRefs.current.setAutoSpinStudio360 = (auto: boolean) => {
+      autoSpinStudioEnabled = auto;
+      setIsAutoSpin360(auto);
+    };
+
+    sceneRefs.current.commandHumanSelect = (itemIdx: number, keepAuto = false) => {
+      walkerState = {
+        ...commandHumanSelectLineItem(walkerState, itemIdx, keepAuto),
+        equippedItemIndex: itemIdx,
+        phase: 'posing_inspection',
+      };
+      setHumanTargetIndex(itemIdx);
+      setHumanEquippedIndex(itemIdx);
+      setHumanPhase('posing_inspection');
       setHumanAutoWalk(keepAuto);
-      applyHumanPoseToMeshes(walkerState, performance.now());
+      const selectedItem = WARDROBE_LINE_ITEMS[itemIdx];
+      if (selectedItem) {
+        studioTurntableTextures.applyBlazerTintHex(
+          itemIdx === 0 ? null : selectedItem.garmentColorHex
+        );
+      }
+      updateStudioModelAndLine(walkerState, performance.now());
       drawFrame();
     };
 
@@ -1768,34 +1844,96 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       setHumanAutoWalk(auto);
     };
 
+    sceneRefs.current.setPhoto3DDisplayMode = (mode: Photo3DDisplayMode) => {
+      currentDisplayMode = mode;
+      const isRawScan = mode === 'raw_photo_scan';
+      landmarkRingsGroup.visible = isRawScan;
+      caliperRing.visible = isRawScan;
+      caliperMat.opacity = isRawScan ? 0.85 : 0.0;
+      updateStudioModelAndLine(walkerState, performance.now());
+      drawFrame();
+    };
+
     sceneRefs.current.updateMaterials = (swatch: FabricSwatch) => {
-      blazerMat.color.setHex(swatch.blazerHex);
-      blazerMat.roughness = swatch.roughness;
-      trouserMat.color.setHex(swatch.trouserHex);
-      teeMat.color.setHex(swatch.teeHex);
-      humanJacketMat.color.setHex(swatch.blazerHex);
-      humanJacketMat.roughness = swatch.roughness;
+      studioTurntableTextures.applyBlazerTintHex(
+        swatch.id === 'ecru-marl' ? null : swatch.blazerHex
+      );
       drawFrame();
     };
 
     sceneRefs.current.updatePassGeometry = (passIdx: number, explode: number) => {
-      const squeeze = passIdx === 0 ? 0.94 : passIdx === 1 ? 0.98 : 1.02;
-      blazerGroup.scale.set(squeeze, 1.0, squeeze);
       caliperMat.color.setHex(passIdx === 0 ? 0xf43f5e : passIdx === 1 ? 0xf59e0b : 0x10b981);
-
-      blazerGroup.position.z = explode * 0.28;
-      teeMesh.position.z = -explode * 0.14;
-      trouserGroup.position.y = -explode * 0.18;
-      watchGroup.position.x = -0.35 * chestScale - explode * 0.25;
-      shoeGroup.position.y = -explode * 0.3;
-
+      const showRings = explode > 0.02 || currentDisplayMode === 'raw_photo_scan';
+      landmarkRingsGroup.visible = showRings;
+      caliperRing.visible = showRings;
+      caliperMat.opacity = showRings ? Math.max(0.45, explode) : 0.0;
       drawFrame();
     };
 
-    sceneRefs.current.setCameraTarget = (pos, lookAt) => {
-      camera.position.set(...pos);
-      controls.target.set(...lookAt);
+    sceneRefs.current.applyVerticalLockConstraints = (
+      locked: boolean,
+      dockCollapsed: boolean,
+      recenterMannequin = false
+    ) => {
+      verticalLockActiveInScene = locked;
+      const lockSpec = computeMannequinVerticalLockCameraSpec({
+        verticalLocked: locked,
+        statureScaleY: bodySpec3D.scales.statureY,
+        isDockCollapsed: dockCollapsed,
+      });
+
+      if (locked || recenterMannequin) {
+        // Preserve horizontal azimuth angle around the mannequin if already orbiting,
+        // or reset to front 0° when explicitly recentering
+        const currentAzimuth = recenterMannequin
+          ? 0
+          : Math.atan2(camera.position.x, camera.position.z);
+        const dist = lockSpec.camPos[2];
+        camera.position.set(
+          Math.sin(currentAzimuth) * dist,
+          lockSpec.camPos[1],
+          Math.cos(currentAzimuth) * dist
+        );
+        controls.target.set(...lockSpec.lookAt);
+      }
+
+      controls.minPolarAngle = lockSpec.minPolarAngle;
+      controls.maxPolarAngle = lockSpec.maxPolarAngle;
+      controls.enablePan = lockSpec.enablePan;
+      controls.enableZoom = lockSpec.enableZoom;
+      controls.minDistance = lockSpec.minDistance;
+      controls.maxDistance = lockSpec.maxDistance;
       controls.update();
+      updateStudioModelAndLine(walkerState, performance.now());
+      drawFrame();
+    };
+
+    sceneRefs.current.setCameraTarget = (pos, lookAt, sectionId) => {
+      if (sectionId === 'mannequin') {
+        const lockSpec = computeMannequinVerticalLockCameraSpec({
+          verticalLocked: verticalLockActiveInScene,
+          statureScaleY: bodySpec3D.scales.statureY,
+          isDockCollapsed,
+        });
+        camera.position.set(...lockSpec.camPos);
+        controls.target.set(...lockSpec.lookAt);
+        controls.minPolarAngle = lockSpec.minPolarAngle;
+        controls.maxPolarAngle = lockSpec.maxPolarAngle;
+        controls.enablePan = lockSpec.enablePan;
+        controls.enableZoom = lockSpec.enableZoom;
+        controls.minDistance = lockSpec.minDistance;
+        controls.maxDistance = lockSpec.maxDistance;
+      } else {
+        // Allow camera to frame the selected architectural closet bay
+        controls.minPolarAngle = Math.PI * 0.14;
+        controls.maxPolarAngle = Math.PI * 0.52;
+        controls.minDistance = 1.25;
+        controls.maxDistance = 7.5;
+        camera.position.set(...pos);
+        controls.target.set(...lookAt);
+      }
+      controls.update();
+      updateStudioModelAndLine(walkerState, performance.now());
       drawFrame();
     };
 
@@ -1829,9 +1967,15 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       const key = e.key.toLowerCase();
       if (key === 'h') {
         setIsDockCollapsed((prev) => !prev);
+      } else if (key === 'l') {
+        setIsVerticalLocked((prev) => {
+          const next = !prev;
+          onToggleVerticalScreenLock?.(next);
+          return next;
+        });
       } else if (key >= '1' && key <= '5') {
         const idx = Number(key) - 1;
-        sceneRefs.current.commandHumanSelect?.(idx, walkerState.autoCycleEnabled);
+        sceneRefs.current.commandHumanSelect?.(idx, false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -1841,6 +1985,7 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       renderer.domElement.removeEventListener('mousedown', handlePointerDown);
       renderer.domElement.removeEventListener('mouseup', handlePointerUp);
+      renderer.domElement.removeEventListener('wheel', handleCanvasWheel);
       resizeObserver.disconnect();
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
@@ -1848,9 +1993,36 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
       weaveTex.dispose();
       parquetTex.dispose();
       dialTex.dispose();
+      studioPhotoGeo.dispose();
+      studioPhotoMat.dispose();
+      mirrorReflectionMat.dispose();
+      footShadowGeo.dispose();
+      footShadowMat.dispose();
+      studioTurntableTextures.dispose();
       renderer.dispose();
     };
-  }, [measurements.chest, measurements.waist, measurements.hip]);
+  }, [
+    measurements.chest,
+    measurements.waist,
+    measurements.hip,
+    heightCm,
+    effectiveFrontPhoto,
+    effectiveBackPhoto,
+    effectiveSidePhoto,
+    studioFrames,
+    activeGarmentId,
+    garmentFrontImage,
+    garmentBackImage,
+    effectiveTrueSize,
+  ]);
+
+  useEffect(() => {
+    sceneRefs.current.applyVerticalLockConstraints?.(
+      isVerticalLocked,
+      isDockCollapsed,
+      activeSection === 'mannequin'
+    );
+  }, [isVerticalLocked, isDockCollapsed, activeSection]);
 
   useEffect(() => {
     sceneRefs.current.updateMaterials?.(selectedSwatch);
@@ -1860,10 +2032,51 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     sceneRefs.current.updatePassGeometry?.(effectivePassIndex, explodeFactor);
   }, [effectivePassIndex, explodeFactor]);
 
+  const handleToggleVerticalLock = () => {
+    const nextLocked = !isVerticalLocked;
+    setIsVerticalLocked(nextLocked);
+    if (nextLocked) {
+      setActiveSection('mannequin');
+      sceneRefs.current.applyVerticalLockConstraints?.(true, isDockCollapsed, true);
+      sceneRefs.current.highlightBay?.('mannequin');
+    } else {
+      sceneRefs.current.applyVerticalLockConstraints?.(false, isDockCollapsed, false);
+    }
+    onToggleVerticalScreenLock?.(nextLocked);
+  };
+
   const handleSelectClosetBay = (bay: ClosetBayMeta) => {
     setActiveSection(bay.id);
-    sceneRefs.current.setCameraTarget?.(bay.camPos, bay.lookAt);
+    if (bay.id === 'mannequin') {
+      setShowBayInventoryDrawer(false);
+    } else if (['blazers', 'knitwear', 'trousers', 'watches', 'footwear'].includes(bay.id)) {
+      setShowBayInventoryDrawer(true);
+    }
+    sceneRefs.current.setCameraTarget?.(bay.camPos, bay.lookAt, bay.id);
     sceneRefs.current.highlightBay?.(bay.id);
+  };
+
+  const handleTogglePhoto3DMode = (nextMode: Photo3DDisplayMode) => {
+    setPhoto3DMode(nextMode);
+    sceneRefs.current.setPhoto3DDisplayMode?.(nextMode);
+  };
+
+  const handleInlinePhotoFileChange = (
+    slot: 'front' | 'back' | 'side',
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        if (slot === 'front') setLocalFrontPhoto(reader.result);
+        if (slot === 'back') setLocalBackPhoto(reader.result);
+        if (slot === 'side') setLocalSidePhoto(reader.result);
+        onPhotoUpload?.(slot, reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const currentBayMeta = CLOSET_BAYS.find((b) => b.id === activeSection) || CLOSET_BAYS[0];
@@ -1903,64 +2116,275 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
 
   return (
     <div
+      data-testid="three-closet-stage"
+      data-vertical-lock={isVerticalLocked ? 'locked' : 'unlocked'}
+      data-active-bay={activeSection}
       className={
         isFullBleed
           ? 'fixed inset-0 z-50 w-screen h-screen bg-[#0d111a]'
-          : 'relative w-full h-[580px] rounded-2xl overflow-hidden border border-slate-800 bg-[#0d111a]'
+          : isVerticalLocked
+            ? 'relative w-full h-[calc(100vh-92px)] min-h-[600px] max-h-[820px] rounded-2xl overflow-hidden border border-slate-800 bg-[#0d111a]'
+            : 'relative w-full h-[640px] rounded-2xl overflow-hidden border border-slate-800 bg-[#0d111a]'
       }
     >
       {/* Full-Canvas 3D Walk-In Closet WebGL Mount */}
       <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
-      {/* Top-Left Brand & Active Closet Bay Pill */}
+      {/* Single-Line Top Bar: Mannequin Focus Status, Vertical Screen Lock Toggle, and Inspector Triggers */}
       <div
-        style={{ backgroundColor: 'rgba(13, 17, 26, 0.9)' }}
-        className="absolute top-3 left-3 z-10 px-3 py-1.5 rounded-xl border border-slate-700/80 text-xs text-slate-200 flex flex-wrap items-center gap-2.5"
+        style={{ backgroundColor: 'rgba(13, 17, 26, 0.92)' }}
+        className="absolute top-2.5 inset-x-3 z-10 px-3 py-1.5 rounded-xl border border-slate-700/80 text-xs text-slate-200 flex items-center justify-between gap-2 overflow-x-auto"
       >
-        <span className="font-bold text-amber-300 tracking-wide uppercase text-[10px] flex items-center gap-1">
-          <Compass className="w-3.5 h-3.5 text-amber-400" />
-          <span>3D Walk-In Closet &amp; Atelier</span>
-        </span>
-        <span className="text-slate-600" aria-hidden="true">·</span>
-        <span className="font-semibold text-white">{currentBayMeta.zoneTitle}</span>
-        <span className="text-slate-600 hidden sm:inline" aria-hidden="true">·</span>
-        <span className="font-mono text-[11px] text-emerald-400 hidden sm:inline">
-          {heightCm}cm · {measurements.chest}/{measurements.waist}/{measurements.hip}cm · Size {effectiveTrueSize}
-        </span>
-        <button
-          type="button"
-          onClick={() => setIsFullBleed((prev) => !prev)}
-          className="ml-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold flex items-center gap-1 border border-slate-600/70 cursor-pointer"
-          title="Toggle 100vw x 100vh full-bleed 3D Walk-In Closet Room"
-        >
-          {isFullBleed ? (
-            <>
-              <Minimize2 className="w-3 h-3" />
-              <span>Exit Fullscreen</span>
-            </>
-          ) : (
-            <>
-              <Maximize2 className="w-3 h-3" />
-              <span>Full-Bleed 100vw×100vh</span>
-            </>
+        <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
+          <span className="font-bold text-amber-300 tracking-wide uppercase text-[10px] flex items-center gap-1">
+            <Compass className="w-3.5 h-3.5 text-amber-400" />
+            <span>360° Mannequin Stage ({activeStudioAngle}°)</span>
+          </span>
+          <span className="text-slate-600" aria-hidden="true">·</span>
+          <span className="font-semibold text-white">{currentBayMeta.zoneTitle}</span>
+          <span className="text-slate-600 hidden xl:inline" aria-hidden="true">·</span>
+          <span className="font-mono tabular-nums text-[11px] text-emerald-400 hidden xl:inline">
+            {heightCm}cm · {measurements.chest}/{measurements.waist}/{measurements.hip}cm · Size {effectiveTrueSize}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1.5 whitespace-nowrap shrink-0">
+          {/* Primary Vertical Screen Lock Toggle (Mannequin Focus) */}
+          <button
+            type="button"
+            onClick={handleToggleVerticalLock}
+            aria-pressed={isVerticalLocked}
+            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              isVerticalLocked
+                ? 'bg-amber-500/20 hover:bg-amber-500/30 border-amber-400 text-amber-200'
+                : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-300'
+            }`}
+            title="Lock or unlock vertical camera tilt and viewport vertical scroll around the 360° Studio Mannequin (Shortcut: L)"
+          >
+            {isVerticalLocked ? (
+              <>
+                <Lock className="w-3 h-3 text-amber-300" />
+                <span>Vertical Screen Lock: ON (Mannequin Focus)</span>
+              </>
+            ) : (
+              <>
+                <Unlock className="w-3 h-3 text-slate-400" />
+                <span>Vertical Screen Lock: OFF (Free Scroll)</span>
+              </>
+            )}
+          </button>
+
+          {/* Toggle 360° Fitting Studio Photo & User Pictures Inspector */}
+          <button
+            type="button"
+            onClick={() => setShowPhoto3DInspector((prev) => !prev)}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              showPhoto3DInspector
+                ? 'bg-emerald-600 border-emerald-400 text-white'
+                : 'bg-emerald-950/80 hover:bg-emerald-900/90 text-emerald-300 border-emerald-500/60'
+            }`}
+            title="Inspect the 360° Fitting Studio photo frames and user calibration photos"
+          >
+            <Scan className="w-3 h-3" />
+            <span>360° Photo &amp; Slices</span>
+          </button>
+
+          {/* Toggle Bay Inventory Drawer on demand so Mannequin center stays 100% unobstructed */}
+          {(onTryOnClosetItem || onTryOnShopProduct || onTryOnOutfitSlot) && (
+            <button
+              type="button"
+              onClick={() => setShowBayInventoryDrawer((prev) => !prev)}
+              className={`px-2 py-1 rounded-lg text-[10px] font-semibold flex items-center gap-1 border cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                showBayInventoryDrawer
+                  ? 'bg-indigo-600 border-indigo-400 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-600/80'
+              }`}
+              title="Show or hide closet & shop garments for the active bay"
+            >
+              <Layers className="w-3 h-3 text-indigo-300" />
+              <span>{showBayInventoryDrawer ? 'Hide Drawer' : 'Closet Drawer'}</span>
+            </button>
           )}
-        </button>
+
+          {onScrollToFeedBelow && (
+            <button
+              type="button"
+              onClick={onScrollToFeedBelow}
+              className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold flex items-center gap-1 border border-indigo-400/60 cursor-pointer whitespace-nowrap shrink-0"
+              title="Unlock vertical screen lock and jump down to AI Search, 5-Piece Lookbook & Live Shop Feed"
+            >
+              <ArrowDown className="w-3 h-3" />
+              <span>Shop &amp; Outfit Feed</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setIsFullBleed((prev) => !prev)}
+            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold flex items-center gap-1 border border-slate-600/70 cursor-pointer whitespace-nowrap shrink-0"
+            title="Toggle 100vw x 100vh full-bleed 3D Mannequin Stage"
+          >
+            {isFullBleed ? (
+              <>
+                <Minimize2 className="w-3 h-3" />
+                <span>Exit</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3 h-3" />
+                <span>Full-Bleed</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
-      {/* Top-Right Dedicated Section Inspector Drawer (Click any item to Try in 360° Studio) */}
-      {(onTryOnClosetItem || onTryOnShopProduct || onTryOnOutfitSlot) && (
+      {/* Inline 360° Fitting Studio Photo & User Pictures Inspector Drawer */}
+      {showPhoto3DInspector && (
         <div
-          style={{ backgroundColor: 'rgba(13, 17, 26, 0.92)' }}
-          className="absolute top-14 right-3 z-10 w-68 rounded-xl border border-slate-700/80 p-3 text-slate-200 space-y-2 hidden md:block"
+          style={{ backgroundColor: 'rgba(13, 17, 26, 0.96)' }}
+          className="absolute top-14 left-3 z-20 w-80 sm:w-96 rounded-xl border border-emerald-500/60 p-3.5 text-slate-200 space-y-2.5 shadow-2xl"
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div className="flex items-center gap-1.5">
+              <Scan className="w-4 h-4 text-emerald-400" />
+              <span className="text-xs font-bold text-white">
+                360° Fitting Studio Photo in 3D Closet
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPhoto3DInspector(false)}
+              className="text-[10px] font-semibold text-slate-400 hover:text-white cursor-pointer"
+            >
+              Close ✕
+            </button>
+          </div>
+
+          <p className="text-[11px] text-slate-300 leading-relaxed">
+            The central pedestal renders your live{' '}
+            <span className="text-emerald-300 font-semibold">8-angle 360° Fitting Studio photo</span>{' '}
+            ({activeGarmentName || 'Zara Comfort Suit Blazer'} · Size {effectiveTrueSize}) with
+            studio cyclorama cutout and tri-fold mirror reflection.
+          </p>
+
+          {/* 3 Source User Pictures with Inline Upload */}
+          <div className="grid grid-cols-3 gap-2">
+            {(
+              [
+                { slot: 'front' as const, label: '1. Front Photo', img: effectiveFrontPhoto },
+                { slot: 'back' as const, label: '2. Back Photo', img: effectiveBackPhoto },
+                { slot: 'side' as const, label: '3. Side Profile', img: effectiveSidePhoto },
+              ] as const
+            ).map((viewItem) => (
+              <div
+                key={viewItem.slot}
+                className="rounded-lg bg-slate-900/90 border border-slate-800 p-1.5 flex flex-col gap-1"
+              >
+                <div className="flex items-center justify-between text-[9px] font-bold uppercase text-slate-400">
+                  <span>{viewItem.label}</span>
+                  <span className="text-emerald-400">360°</span>
+                </div>
+                <div className="aspect-3/4 rounded bg-slate-950 overflow-hidden border border-slate-800 relative">
+                  {viewItem.img ? (
+                    <img
+                      src={viewItem.img}
+                      alt={viewItem.label}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover object-top"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-[9px] text-slate-500">
+                      No Photo
+                    </div>
+                  )}
+                </div>
+                <label className="mt-0.5 px-1.5 py-1 rounded bg-slate-800 hover:bg-indigo-600 text-[9px] font-semibold text-center text-slate-200 hover:text-white flex items-center justify-center gap-1 cursor-pointer transition-colors">
+                  <Upload className="w-2.5 h-2.5" />
+                  <span>Upload {viewItem.slot}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleInlinePhotoFileChange(viewItem.slot, e)}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+
+          {/* Extracted 3D Elliptical Cross-Section Geometry Readout */}
+          <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2 space-y-1 font-mono text-[10px]">
+            <div className="text-[10px] font-sans font-bold uppercase tracking-wider text-cyan-300 flex items-center justify-between">
+              <span>Calibrated Fit Cross-Sections</span>
+              <span className="text-emerald-400 font-mono">Angle {activeStudioAngle}°</span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-slate-300 pt-0.5">
+              <div>
+                Shoulders: <span className="text-white font-bold">{bodySpec3D.shoulderWidthCm}cm</span> W
+              </div>
+              <div>
+                Chest: <span className="text-white font-bold">{bodySpec3D.chestWidthCm}×{bodySpec3D.chestDepthCm}cm</span>
+              </div>
+              <div>
+                Waist: <span className="text-white font-bold">{bodySpec3D.waistWidthCm}×{bodySpec3D.waistDepthCm}cm</span>
+              </div>
+              <div>
+                Hip: <span className="text-white font-bold">{bodySpec3D.hipWidthCm}×{bodySpec3D.hipDepthCm}cm</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 pt-0.5">
+            <button
+              type="button"
+              onClick={() =>
+                handleTogglePhoto3DMode(
+                  photo3DMode === 'photo_twin_dressed' ? 'raw_photo_scan' : 'photo_twin_dressed'
+                )
+              }
+              className="flex-1 py-1.5 px-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Scan className="w-3 h-3" />
+              <span>
+                {photo3DMode === 'raw_photo_scan'
+                  ? 'Switch to Dressed 360° Studio Photo'
+                  : 'Inspect Before Photo + 3D Fit Slices'}
+              </span>
+            </button>
+            {onOpenPhotoSetup && (
+              <button
+                type="button"
+                onClick={onOpenPhotoSetup}
+                className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold border border-slate-700 cursor-pointer"
+              >
+                Full Photo Setup &rarr;
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* On-Demand Right Section Inspector Drawer (Hidden by default in Mannequin Focus for zero viewport occlusion) */}
+      {showBayInventoryDrawer && (onTryOnClosetItem || onTryOnShopProduct || onTryOnOutfitSlot) && (
+        <div
+          style={{ backgroundColor: 'rgba(13, 17, 26, 0.94)' }}
+          className="absolute top-14 right-3 z-20 w-72 rounded-xl border border-slate-700/80 p-3 text-slate-200 space-y-2 shadow-2xl"
         >
           <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
             <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
               {currentBayMeta.label} Inventory
             </span>
-            <span className="text-[10px] font-mono text-emerald-400">Click to Fit in 360°</span>
+            <button
+              type="button"
+              onClick={() => setShowBayInventoryDrawer(false)}
+              className="text-[10px] font-semibold text-slate-400 hover:text-white cursor-pointer"
+            >
+              Close ✕
+            </button>
           </div>
 
-          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+          <div className="space-y-1.5 max-h-52 overflow-y-auto pr-0.5">
             {focusedClosetItems.slice(0, 3).map((item) => (
               <div
                 key={item.id}
@@ -2026,21 +2450,21 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
         </div>
       )}
 
-      {/* Unified Bottom Control Dock (<= 15% viewport height, solid rgba surface, collapsible with H) */}
-      <div className="absolute bottom-3 inset-x-3 z-10 flex flex-col items-center pointer-events-none">
+      {/* Sleek Compact Bottom Control Dock (<= 13% viewport height so Mannequin feet & pedestal are 100% unobstructed) */}
+      <div className="absolute bottom-2.5 inset-x-3 z-10 flex flex-col items-center pointer-events-none">
         <div className="pointer-events-auto w-full max-w-5xl">
-          <div className="flex justify-center mb-1.5">
+          <div className="flex justify-center mb-1">
             <button
               type="button"
               onClick={() => setIsDockCollapsed((prev) => !prev)}
               style={{ backgroundColor: 'rgba(13, 17, 26, 0.92)' }}
-              className="px-3 py-1 rounded-full border border-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-0.5 rounded-full border border-slate-700 text-[10px] font-semibold text-slate-300 hover:text-white flex items-center gap-1.5 cursor-pointer"
               title="Toggle 3D Walk-In Closet Controls (Shortcut: H)"
             >
               <Sliders className="w-3 h-3 text-indigo-400" />
               <span>
                 {isDockCollapsed
-                  ? 'Show 3D Closet Bays & Controls (H)'
+                  ? 'Show 360° Mannequin & Closet Controls (H)'
                   : 'Hide Controls · Zen Mode (H)'}
               </span>
             </button>
@@ -2049,14 +2473,47 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
           {!isDockCollapsed && (
             <div
               style={{ backgroundColor: 'rgba(13, 17, 26, 0.94)' }}
-              className="rounded-2xl border border-slate-700/90 px-4 py-2.5 text-xs text-slate-200 flex flex-col gap-2"
+              className="rounded-xl border border-slate-700/90 px-3.5 py-2 text-xs text-slate-200 flex flex-col gap-1.5"
             >
-              {/* Row 1: Dedicated Walk-In Closet Section Camera Presets */}
+              {/* Row 1: 360° Studio Mannequin Angle Controls + Closet Bay Switcher */}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-1">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1 mr-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1 mr-0.5 whitespace-nowrap">
+                    <RotateCw className="w-3 h-3 text-indigo-400" />
+                    <span>360° Mannequin Angle:</span>
+                  </span>
+                  {([0, 45, 90, 135, 180, 225, 270, 315] as const).map((deg) => (
+                    <button
+                      key={deg}
+                      type="button"
+                      onClick={() => sceneRefs.current.setManualStudioAngleDeg?.(deg)}
+                      className={`px-2 py-0.5 rounded-md text-[11px] font-mono tabular-nums font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        activeStudioAngle === deg && !isAutoSpin360
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'
+                      }`}
+                    >
+                      {deg}°
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => sceneRefs.current.setAutoSpinStudio360?.(!isAutoSpin360)}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold flex items-center gap-1 border cursor-pointer whitespace-nowrap shrink-0 ${
+                      isAutoSpin360
+                        ? 'bg-emerald-600 border-emerald-400 text-white'
+                        : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    {isAutoSpin360 ? <Pause className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                    <span>Auto 360°</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1 mr-0.5 whitespace-nowrap">
                     <Camera className="w-3 h-3 text-amber-400" />
-                    <span>Closet Bays:</span>
+                    <span>Bay:</span>
                   </span>
                   {CLOSET_BAYS.map((bay) => {
                     const isActive = activeSection === bay.id;
@@ -2065,7 +2522,7 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
                         key={bay.id}
                         type="button"
                         onClick={() => handleSelectClosetBay(bay)}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                           isActive
                             ? 'bg-indigo-600 text-white'
                             : 'bg-slate-800/90 text-slate-300 hover:bg-slate-700 hover:text-white'
@@ -2076,41 +2533,16 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
                     );
                   })}
                 </div>
-
-                {/* Fabric Swatch Selector */}
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                    <Sparkles className="w-3 h-3 text-indigo-400" />
-                    <span>Tailoring Swatch:</span>
-                  </span>
-                  {FABRIC_SWATCHES.map((sw) => (
-                    <button
-                      key={sw.id}
-                      type="button"
-                      onClick={() => setSelectedSwatch(sw)}
-                      title={sw.name}
-                      className={`w-5 h-5 rounded-full border transition-transform cursor-pointer ${
-                        selectedSwatch.id === sw.id
-                          ? 'border-white scale-110 ring-2 ring-indigo-500'
-                          : 'border-slate-600 opacity-80 hover:opacity-100'
-                      }`}
-                      style={{
-                        backgroundColor: `#${sw.blazerHex.toString(16).padStart(6, '0')}`,
-                      }}
-                    />
-                  ))}
-                </div>
               </div>
 
-              {/* Row 2: 3D Human Walking & Selecting Clothing from the Line */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-800/90">
+              {/* Row 2: Wardrobe Line Fit + Tailoring Swatches + Before/Slices Mode */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/90">
                 <div className="flex flex-wrap items-center gap-1">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-1 mr-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-1 mr-0.5 whitespace-nowrap">
                     <UserCheck className="w-3 h-3 text-emerald-400" />
-                    <span>3D Human Select from Line:</span>
+                    <span>Wardrobe Line:</span>
                   </span>
                   {WARDROBE_LINE_ITEMS.map((item, idx) => {
-                    const isTarget = humanTargetIndex === idx;
                     const isEquipped = humanEquippedIndex === idx;
                     const shortTitle =
                       idx === 0
@@ -2129,17 +2561,15 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
                         onClick={() => {
                           sceneRefs.current.commandHumanSelect?.(idx, false);
                         }}
-                        className={`px-2 py-0.5 rounded-lg text-[11px] font-semibold transition-colors flex items-center gap-1.5 cursor-pointer ${
-                          isTarget
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-semibold transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 ${
+                          isEquipped
                             ? 'bg-emerald-600 text-white'
-                            : isEquipped
-                              ? 'bg-slate-800 text-emerald-300 border border-emerald-500/50'
-                              : 'bg-slate-800/90 text-slate-300 hover:bg-slate-700 hover:text-white'
+                            : 'bg-slate-800/90 text-slate-300 hover:bg-slate-700 hover:text-white'
                         }`}
-                        title={`Command 3D human to walk & select ${item.label} from the brass clothing line`}
+                        title={`Select ${item.label} from the brass clothing line to preview on the 360° Studio Mannequin`}
                       >
                         <span
-                          className="w-2.5 h-2.5 rounded-full border border-white/40 shrink-0"
+                          className="w-2 h-2 rounded-full border border-white/40 shrink-0"
                           style={{
                             backgroundColor: `#${item.garmentColorHex.toString(16).padStart(6, '0')}`,
                           }}
@@ -2150,104 +2580,52 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
                   })}
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono text-indigo-300 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-                    {humanPhase === 'walking_to_rack'
-                      ? `Walking to Hanger #${humanTargetIndex + 1}`
-                      : humanPhase === 'reaching_garment'
-                        ? `Reaching Hanger #${humanTargetIndex + 1} on Line`
-                        : humanPhase === 'equipping_garment'
-                          ? `Putting on ${WARDROBE_LINE_ITEMS[humanTargetIndex]?.brand || 'Garment'}`
-                          : humanPhase === 'walking_to_mirror'
-                            ? 'Walking to Atelier Mirror'
-                            : 'Inspecting Fit at Mirror'}
-                  </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Fabric Swatch Selector */}
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 whitespace-nowrap">
+                      <Sparkles className="w-3 h-3 text-indigo-400" />
+                      <span>Swatch:</span>
+                    </span>
+                    {FABRIC_SWATCHES.map((sw) => (
+                      <button
+                        key={sw.id}
+                        type="button"
+                        onClick={() => setSelectedSwatch(sw)}
+                        title={sw.name}
+                        className={`w-4 h-4 rounded-full border transition-transform cursor-pointer ${
+                          selectedSwatch.id === sw.id
+                            ? 'border-white scale-110 ring-2 ring-indigo-500'
+                            : 'border-slate-600 opacity-80 hover:opacity-100'
+                        }`}
+                        style={{
+                          backgroundColor: `#${sw.blazerHex.toString(16).padStart(6, '0')}`,
+                        }}
+                      />
+                    ))}
+                  </div>
 
+                  {/* Dressed vs Before Photo + 3D Slices */}
                   <button
                     type="button"
-                    onClick={() => {
-                      const nextAuto = !humanAutoWalk;
-                      sceneRefs.current.setHumanAutoCycle?.(nextAuto);
-                    }}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold flex items-center gap-1 border cursor-pointer ${
-                      humanAutoWalk
-                        ? 'bg-indigo-600/30 border-indigo-400/50 text-indigo-200'
-                        : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                    onClick={() =>
+                      handleTogglePhoto3DMode(
+                        photo3DMode === 'photo_twin_dressed' ? 'raw_photo_scan' : 'photo_twin_dressed'
+                      )
+                    }
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold flex items-center gap-1 border cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                      photo3DMode === 'raw_photo_scan'
+                        ? 'bg-cyan-600 border-cyan-300 text-white'
+                        : 'bg-slate-800 hover:bg-slate-700 text-cyan-300 border-slate-700'
                     }`}
-                    title="Toggle automatic 3D human walking & browsing along the clothing line"
                   >
-                    {humanAutoWalk ? (
-                      <>
-                        <Pause className="w-2.5 h-2.5" />
-                        <span>Auto-Walk ON</span>
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-2.5 h-2.5" />
-                        <span>Auto-Walk PAUSED</span>
-                      </>
-                    )}
+                    <Eye className="w-3 h-3" />
+                    <span>
+                      {photo3DMode === 'raw_photo_scan'
+                        ? 'Showing: Before + 3D Slices'
+                        : 'Before + 3D Slices'}
+                    </span>
                   </button>
-                </div>
-              </div>
-
-              {/* Row 3: Render-Watch-Critique-Fix Loop Pass + 5-Piece Explode Slider */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1.5 border-t border-slate-800/90">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                    <Eye className="w-3 h-3 text-indigo-400" />
-                    <span>3D Loop Pass:</span>
-                  </span>
-                  <div className="flex items-center gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800">
-                    {[0, 1, 2].map((idx) => {
-                      const passObj = effectiveIterations?.[idx];
-                      const active = effectivePassIndex === idx;
-                      return (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => {
-                            onSelectPassIndex?.(idx);
-                            onSelectPass?.(idx + 1);
-                          }}
-                          className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
-                            active
-                              ? 'bg-indigo-600 text-white'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          Pass {idx + 1} ({passObj ? passObj.overallScore : idx === 0 ? 73.4 : idx === 1 ? 89.2 : 97.4})
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                    <Layers className="w-3 h-3 text-emerald-400" />
-                    <span>5-Piece Explode:</span>
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={explodeFactor}
-                    onChange={(e) => setExplodeFactor(Number(e.target.value))}
-                    aria-label="Explode 5-piece outfit layers"
-                    className="w-24 accent-indigo-500 cursor-pointer"
-                  />
-                  <span className="font-mono text-[11px] text-slate-300 w-8">
-                    {Math.round(explodeFactor * 100)}%
-                  </span>
-                </div>
-
-                <div className="text-[11px] text-slate-400 truncate max-w-xs hidden lg:block">
-                  <span className="text-slate-500">Wearing from Line:</span>{' '}
-                  <span className="text-emerald-300 font-semibold">
-                    {WARDROBE_LINE_ITEMS[humanEquippedIndex]?.label || activeOutfit?.title}
-                  </span>
                 </div>
               </div>
             </div>
@@ -2257,3 +2635,5 @@ export const ThreeGarmentWorldScene: React.FC<ThreeGarmentWorldSceneProps> = ({
     </div>
   );
 };
+
+

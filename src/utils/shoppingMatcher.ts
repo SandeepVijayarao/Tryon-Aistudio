@@ -173,11 +173,15 @@ export function normalizeShopifyProduct(
   const sizeMap = new Map<string, ShoppingVariantStock>();
   const sizeOrder = ['XS', 'S', 'M', 'L', 'XL'];
 
+  const cleanBase = storeBaseUrl.replace(/\/$/, '');
+  const canonicalProductUrl = `${cleanBase}/products/${rawProduct.handle}`;
+
   for (const v of rawVariants) {
     const normSize = normalizeShopifyVariantSize(String(v.title || v.option1 || ''));
     if (!normSize) continue;
     const isAvail = Boolean(v.available);
     const existing = sizeMap.get(normSize);
+    const variantIdStr = v.id ? String(v.id) : undefined;
     // If multiple variants map to the same size (e.g. Short/Regular length), mark available if any is available
     if (!existing || (!existing.available && isAvail)) {
       sizeMap.set(normSize, {
@@ -186,6 +190,10 @@ export function normalizeShopifyProduct(
         available: isAvail,
         price: String(v.price || '0.00'),
         sku: v.sku ? String(v.sku) : undefined,
+        variantId: variantIdStr,
+        variantUrl: variantIdStr
+          ? `${canonicalProductUrl}?variant=${variantIdStr}`
+          : canonicalProductUrl,
       });
     }
   }
@@ -219,8 +227,6 @@ export function normalizeShopifyProduct(
     stripHtmlTags(bodyHtml) ||
     `${brandName} ${title} (${productType}). Cut: ${cut}, Fabric: ${fabric.replace('_', ' ')}.`;
 
-  const cleanBase = storeBaseUrl.replace(/\/$/, '');
-
   return {
     id: `${brandName.toLowerCase().replace(/\s+/g, '-')}-${rawProduct.id || rawProduct.handle}`,
     title,
@@ -228,7 +234,7 @@ export function normalizeShopifyProduct(
     category: productType || 'Tops & Outerwear',
     price: variants[0]?.price || '148.00',
     currency: 'USD',
-    productUrl: `${cleanBase}/products/${rawProduct.handle}`,
+    productUrl: canonicalProductUrl,
     frontImage,
     backImage,
     cut,

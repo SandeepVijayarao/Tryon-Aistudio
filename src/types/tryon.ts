@@ -104,6 +104,8 @@ export interface ShoppingVariantStock {
   available: boolean;
   price: string;
   sku?: string;
+  variantId?: string;
+  variantUrl?: string;
 }
 
 export interface ShoppingProduct {
@@ -136,6 +138,9 @@ export interface LiveWebDiscoveryItem {
   httpStatus?: number;
   suggestedCut: CutType;
   suggestedFabric: FabricType;
+  price?: string;
+  imageUrl?: string;
+  fetchMethod?: string;
 }
 
 export interface AIShoppingSearchResponse {
@@ -147,4 +152,17 @@ export interface AIShoppingSearchResponse {
   latencyMs: number;
   cacheHit: boolean;
 }
+
+export interface LiveProductFetchResult {
+  product: ShoppingProduct;
+  fitEvaluation: {
+    trueSize: string | null;
+    trueSizeInStock: boolean;
+    matchScore: number;
+  };
+  sizeSpecificUrl: string;
+  sourceLabel: string;
+  latencyMs: number;
+}
+
 

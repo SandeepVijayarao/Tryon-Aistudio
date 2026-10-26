@@ -6,7 +6,6 @@ import { CompareView } from './components/CompareView.tsx';
 import { HomeStyleAndShopFeed } from './components/HomeStyleAndShopFeed.tsx';
 import { BodyProfileWorkspace } from './components/BodyProfileWorkspace.tsx';
 import { GarmentSpecDrawer } from './components/GarmentSpecDrawer.tsx';
-import { MultiAgentSwarmPanel } from './components/MultiAgentSwarmPanel.tsx';
 import {
   CutType,
   FabricType,
@@ -39,8 +38,6 @@ import {
   Settings,
   ArrowLeft,
   Layers,
-  Cpu,
-  ArrowRight,
 } from 'lucide-react';
 
 const ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
@@ -807,7 +804,7 @@ export default function App() {
     if (!savedProfile.heightCm || !savedProfile.frontImage) return;
 
     setIsProcessing(true);
-    setProcessingMessage('Calibrating torso landmarks once with Gemini 4 Argon...');
+    setProcessingMessage('Calibrating body landmarks from reference photos...');
 
     try {
       const measureRes = await fetch('/api/measure-body', {
@@ -957,71 +954,37 @@ export default function App() {
           </div>
         )}
 
-        {/* VIEW 1 (DEFAULT HOME): STYLE RECOMMENDATIONS WITH EXISTING CLOTHING + LIVE SHOP RECOMMENDATIONS + AI SEARCH */}
+        {/* VIEW 1 (DEFAULT HOME): STYLE RECOMMENDATIONS WITH EXISTING CLOTHING + LIVE SHOP RECOMMENDATIONS + 3D WALK-IN CLOSET */}
         {activeTab === 'home' && (
-          <div className="space-y-5">
-            {/* Compact Argon SF Hackathon Multi-Agent Launch Strip */}
-            <div className="rounded-2xl bg-slate-900 text-white border border-slate-800 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="inline-flex items-center gap-1.5 font-bold uppercase tracking-wider text-[10px] bg-indigo-600/30 border border-indigo-400/40 text-indigo-300 px-2 py-0.5 rounded">
-                  <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-                  Gemini 4 Argon SF Hackathon
-                </span>
-                <span className="font-semibold text-white">
-                  4-Agent Swarm + Three.js 3D World Loop + Omni 1.1 Flash Video Runway
-                </span>
-                <span className="text-slate-400 font-mono text-[11px] hidden xl:inline">
-                  (antigravity-preview-09-2026 · deep-research-preview-04-2026 · gemini-omni-1.1-flash)
-                </span>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('agents');
-                    scrollToTopSmooth();
-                  }}
-                  className="px-3.5 py-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <span>Open Argon Swarm + 3D + Video</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <HomeStyleAndShopFeed
-              measurements={savedProfile.measurements}
-              heightCm={savedProfile.heightCm}
-              existingWardrobe={existingWardrobe}
-              onAddWardrobeItem={(item) => setExistingWardrobe((prev) => [item, ...prev])}
-              onTryOnExistingItem={handleTryOnExistingItem}
-              onTryOnShopProduct={handleSelectShoppingProduct}
-              onTryOnCompleteOutfit={handleTryOnCompleteOutfit}
-              onImportDiscoveryUrl={(url) => handleImportGarmentUrl(url)}
-              onOpenSettings={() => {
-                setIsInitialSetupMode(false);
-                setActiveTab('settings');
-                scrollToTopSmooth();
-              }}
-              onCatalogLoaded={(items) => setQuickCatalog(items.slice(0, 6))}
-              activeGarmentUrl={garmentUrl}
-            />
-          </div>
-        )}
-
-        {/* VIEW 1B: GEMINI 4 ARGON MULTI-AGENT SWARM, THREE.JS 3D WORLD & OMNI VIDEO STUDIO */}
-        {activeTab === 'agents' && (
-          <MultiAgentSwarmPanel
+          <HomeStyleAndShopFeed
             measurements={savedProfile.measurements}
             heightCm={savedProfile.heightCm}
+            userFrontImage={savedProfile.frontImage}
+            userBackImage={savedProfile.backImage}
+            userSideImage={savedProfile.sideImage}
+            frontLandmarks={savedProfile.frontLandmarks}
+            backLandmarks={savedProfile.backLandmarks}
+            sideLandmarks={savedProfile.sideLandmarks}
+            studioFrames={activeFrames}
+            activeGarmentName={garmentName}
+            activeGarmentId={activeGarmentId}
+            garmentFrontImage={garmentFront}
+            garmentBackImage={garmentBack}
+            selectedSize={selectedSize}
+            onPhotoUpload={(slot, dataUrl) => handlePhotoUpload(slot, dataUrl)}
             existingWardrobe={existingWardrobe}
-            shopCatalog={quickCatalog}
-            sizeChart={sizeChart}
-            cut={cut}
-            fabric={fabric}
-            onDeployOutfitToTurntable={(pairing, focusSlot) =>
-              handleTryOnCompleteOutfit(pairing, focusSlot)
-            }
+            onAddWardrobeItem={(item) => setExistingWardrobe((prev) => [item, ...prev])}
+            onTryOnExistingItem={handleTryOnExistingItem}
+            onTryOnShopProduct={handleSelectShoppingProduct}
+            onTryOnCompleteOutfit={handleTryOnCompleteOutfit}
+            onImportDiscoveryUrl={(url) => handleImportGarmentUrl(url)}
+            onOpenSettings={() => {
+              setIsInitialSetupMode(false);
+              setActiveTab('settings');
+              scrollToTopSmooth();
+            }}
+            onCatalogLoaded={(items) => setQuickCatalog(items.slice(0, 6))}
+            activeGarmentUrl={garmentUrl}
           />
         )}
 
@@ -1317,6 +1280,9 @@ export default function App() {
             shopperFront={savedProfile.frontImage}
             shopperBack={savedProfile.backImage}
             shopperSide={savedProfile.sideImage}
+            frontLandmarks={savedProfile.frontLandmarks}
+            backLandmarks={savedProfile.backLandmarks}
+            sideLandmarks={savedProfile.sideLandmarks}
             validations={validations}
             validatingSlot={validatingSlot}
             onPhotoUpload={handlePhotoUpload}

@@ -1,13 +1,17 @@
 import React from 'react';
 import { PhotoSlot } from './PhotoSlot.tsx';
-import { BodyMeasurements, ValidationResult } from '../types/tryon.ts';
-import { UserCheck, ArrowRight, RotateCw, Sliders, Settings } from 'lucide-react';
+import { ThreeGarmentWorldScene } from './ThreeGarmentWorldScene.tsx';
+import { BodyMeasurements, PhotoLandmarks, SideLandmarks, ValidationResult } from '../types/tryon.ts';
+import { UserCheck, ArrowRight, RotateCw, Sliders, Settings, Scan } from 'lucide-react';
 
 interface BodyProfileWorkspaceProps {
   isSetupMode?: boolean;
   shopperFront?: string;
   shopperBack?: string;
   shopperSide?: string;
+  frontLandmarks?: PhotoLandmarks;
+  backLandmarks?: PhotoLandmarks;
+  sideLandmarks?: SideLandmarks;
   validations: Record<string, ValidationResult>;
   validatingSlot: string | null;
   onPhotoUpload: (slot: string, dataUrl: string | undefined) => void;
@@ -33,6 +37,9 @@ export const BodyProfileWorkspace: React.FC<BodyProfileWorkspaceProps> = ({
   shopperFront,
   shopperBack,
   shopperSide,
+  frontLandmarks,
+  backLandmarks,
+  sideLandmarks,
   validations,
   validatingSlot,
   onPhotoUpload,
@@ -74,11 +81,11 @@ export const BodyProfileWorkspace: React.FC<BodyProfileWorkspaceProps> = ({
             </div>
             <h2 className="text-xl font-bold text-slate-900 mt-1">
               {isSetupMode
-                ? 'Set Up Your Body Profile Once'
-                : 'Edit Photos, Measurements & Compute Settings'}
+                ? 'Set Up Your Body Profile & 3D Twin Once'
+                : 'Edit Photos, 3D Body Representation & Compute Settings'}
             </h2>
             <p className="text-sm text-slate-600 mt-0.5 max-w-2xl">
-              Upload your Front, Back, and optional Side photos during setup—or refine your height and measurements here anytime. Your calibrated profile powers instant style and shop recommendations with minimal compute.
+              Upload your Front, Back, and optional Side photos during setup—or refine your height and measurements here anytime. Your photos directly texture and loft your 3D human representation.
             </p>
           </div>
 
@@ -169,12 +176,12 @@ export const BodyProfileWorkspace: React.FC<BodyProfileWorkspaceProps> = ({
               1. Upload Your Reference Photos (Front, Back &amp; Side Profile)
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Stand straight with arms slightly away from your torso. Each photo is validated via Gemini Vision.
+              Stand straight with arms slightly away from your torso. Each photo is verified for full-body framing and mapped onto your 3D representation below.
             </p>
           </div>
           <div className="flex items-center gap-1.5 text-xs text-emerald-700 font-medium">
             <UserCheck className="w-4 h-4" />
-            <span>Reused across all clothing recommendations</span>
+            <span>Reused across all clothing recommendations &amp; 3D Twin</span>
           </div>
         </div>
 
@@ -212,6 +219,36 @@ export const BodyProfileWorkspace: React.FC<BodyProfileWorkspaceProps> = ({
             onImageChange={(img) => onPhotoUpload('side', img)}
           />
         </div>
+
+        {/* Live 3D Representation Reconstructed from Uploaded Reference Photos */}
+        {measurements && (
+          <div className="mt-6 pt-5 border-t border-slate-100 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Scan className="w-4 h-4 text-emerald-600" />
+                <h4 className="text-sm font-bold text-slate-900">
+                  Live 3D Representation Reconstructed from Your Pictures
+                </h4>
+              </div>
+              <span className="text-xs text-slate-500">
+                Click &ldquo;View Raw 3D Photo Scan&rdquo; inside the 3D scene to inspect cylindrical UV projection &amp; landmark rings
+              </span>
+            </div>
+
+            <ThreeGarmentWorldScene
+              measurements={measurements}
+              heightCm={heightCm}
+              userFrontImage={shopperFront}
+              userBackImage={shopperBack}
+              userSideImage={shopperSide}
+              frontLandmarks={frontLandmarks}
+              backLandmarks={backLandmarks}
+              sideLandmarks={sideLandmarks}
+              onPhotoUpload={(slot, dataUrl) => onPhotoUpload(slot, dataUrl)}
+              initialSection="mannequin"
+            />
+          </div>
+        )}
       </section>
 
       {/* Instant Measurement Overrides & Compute Preferences */}
